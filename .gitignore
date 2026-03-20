@@ -33,6 +33,8 @@ yarn-error.log*
 .cache/
 .vercel/
 .eslintcache
+__pycache__/
+*.pyc
 
 ## OS/Editor artifacts
 .DS_Store

@@ -20,6 +20,53 @@
 - Vercel cron will call `GET /admin/index` every 10 minutes.
 - Batches verified before `START_BLOCK` are stored as verified-only and may show limited details.
 
+## ZK alert poller
+- Standalone script: `scripts/zk_alert.py`
+- Local venv on this machine: `source .venv/bin/activate`
+- The poller queries `/stats/zk` with a rolling 24 hour window using full ISO timestamps.
+- It also alerts when the API itself is unreachable and sends a recovery notification once the API responds again.
+- It stores local dedupe state in `/tmp/taikoproofs-zk-alert-state.json` by default.
+
+### Required env vars
+- `ZK_ALERT_API_BASE_URL`
+
+### Optional env vars
+- `ZK_ALERT_THRESHOLD` default `80`
+- `ZK_ALERT_MIN_SAMPLES` default `20`
+- `ZK_ALERT_COOLDOWN_SECONDS` default `21600`
+- `ZK_ALERT_INTERVAL_SECONDS` default `600`
+- `ZK_ALERT_STATE_FILE` default `/tmp/taikoproofs-zk-alert-state.json`
+- `ZK_ALERT_TIMEOUT_SECONDS` default `10`
+- `ZK_ALERT_SLACK_WEBHOOK_URL`
+- `ZK_ALERT_TELEGRAM_BOT_TOKEN`
+- `ZK_ALERT_TELEGRAM_CHAT_ID`
+
+### Example
+```bash
+export ZK_ALERT_API_BASE_URL=https://api.proofs.taiko.xyz
+export ZK_ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+python scripts/zk_alert.py
+```
+
+### Cron example
+```bash
+*/10 * * * * . ZK_ALERT_API_BASE_URL=https://api.proofs.taiko.xyz ZK_ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/... python ./scripts/zk_alert.py >> /tmp/taikoproofs-zk-alert.log 2>&1
+```
+
+### Foreground daemon example
+```bash
+export ZK_ALERT_API_BASE_URL=https://api.proofs.taiko.xyz
+export ZK_ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+python scripts/zk_alert.py --daemon --interval-seconds 600
+```
+
+### Alert behavior
+- `ZK ratio alert` fires when the rolling 24 hour ratio drops below the configured threshold.
+- `ZK ratio recovered` fires when the ratio returns to normal after a breach.
+- `API down` fires when `/stats/zk` cannot be reached or parsed successfully.
+- `API recovered` fires when the API responds again after a down state.
+- The state file keeps `ratio` and `api` dedupe state separately so the two alert classes do not suppress each other.
+
 ## Vercel setup
 - Two projects with explicit roots:
   - Web root: `apps/web`
