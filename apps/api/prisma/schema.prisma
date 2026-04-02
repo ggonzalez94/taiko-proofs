@@ -81,6 +81,41 @@ model BatchProof {
   @@map("batch_proofs")
 }
 
+model ShastaProposal {
+  proposalId             BigInt       @id @map("proposal_id")
+  proposedAt             DateTime     @map("proposed_at")
+  proposedBlock          BigInt       @map("proposed_block")
+  proposedTxHash         String?      @map("proposed_tx_hash") @db.VarChar(66)
+  proposer               String       @map("proposer") @db.VarChar(42)
+  actualProver           String?      @map("actual_prover") @db.VarChar(42)
+  parentProposalHash     String?      @map("parent_proposal_hash") @db.VarChar(66)
+  provenAt               DateTime?    @map("proven_at")
+  provenBlock            BigInt?      @map("proven_block")
+  proofTxHash            String?      @map("proof_tx_hash") @db.VarChar(66)
+  verifierAddress        String?      @map("verifier_address") @db.VarChar(42)
+  proofSystems           ProofSystem[] @default([]) @map("proof_systems")
+  teeVerifiers           String[]     @default([]) @map("tee_verifiers")
+  verifiedAt             DateTime?    @map("verified_at")
+  verifiedBlock          BigInt?      @map("verified_block")
+  verifiedTxHash         String?      @map("verified_tx_hash") @db.VarChar(66)
+  status                 BatchStatus  @default(proposed) @map("status")
+  transitionParentHash   String?      @map("transition_parent_hash") @db.VarChar(66)
+  transitionBlockHash    String?      @map("transition_block_hash") @db.VarChar(66)
+  transitionStateRoot    String?      @map("transition_state_root") @db.VarChar(66)
+  isContested            Boolean      @default(false) @map("is_contested")
+  createdAt              DateTime     @default(now()) @map("created_at")
+  updatedAt              DateTime     @updatedAt @map("updated_at")
+
+  @@index([provenAt])
+  @@index([verifiedAt])
+  @@index([proposedAt])
+  @@index([provenBlock])
+  @@index([verifiedBlock])
+  @@index([proofSystems], type: Gin)
+  @@index([teeVerifiers], type: Gin)
+  @@map("shasta_proposals")
+}
+
 model DailyStat {
   date                   DateTime   @id @db.Date
   provenTotal            Int        @default(0) @map("proven_total")
@@ -109,4 +144,18 @@ model IndexingState {
   updatedAt          DateTime @updatedAt @map("updated_at")
 
   @@map("indexing_state")
+}
+
+model ShastaIndexingState {
+  chainId            Int       @id @map("chain_id")
+  lastProcessedBlock BigInt    @map("last_processed_block")
+  lockId             String?   @db.Uuid @map("lock_id")
+  lockExpiresAt      DateTime? @map("lock_expires_at")
+  lastRunStartedAt   DateTime? @map("last_run_started_at")
+  lastRunFinishedAt  DateTime? @map("last_run_finished_at")
+  lastRunStatus      String?   @map("last_run_status")
+  lastRunError       String?   @db.Text @map("last_run_error")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@map("shasta_indexing_state")
 }

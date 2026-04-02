@@ -8,6 +8,7 @@ import {
 } from "@taikoproofs/shared";
 import { addDays, startOfUtcDay } from "../common/date";
 import { Prisma } from "@prisma/client";
+import { combinedProtocolStatsSql } from "../common/protocol-records.sql";
 
 function dateKey(date: Date) {
   return date.toISOString().slice(0, 10);
@@ -18,12 +19,17 @@ export class StatsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getMetadata(): Promise<StatsMetadataResponse> {
-    const aggregate = await this.prisma.batch.aggregate({
-      _min: { proposedAt: true },
-      _max: { proposedAt: true }
-    });
-    const earliest = aggregate._min.proposedAt ?? null;
-    const latest = aggregate._max.proposedAt ?? null;
+    const [row] = await this.prisma.$queryRaw<
+      { data_start: Date | null; data_end: Date | null }[]
+    >`
+      WITH combined AS (${combinedProtocolStatsSql})
+      SELECT
+        MIN(proposed_at) AS data_start,
+        MAX(proposed_at) AS data_end
+      FROM combined
+    `;
+    const earliest = row?.data_start ?? null;
+    const latest = row?.data_end ?? null;
 
     return {
       dataStart: earliest ? dateKey(earliest) : null,
@@ -48,6 +54,7 @@ export class StatsService {
         proving_avg_seconds: number | null;
       }[]
     >`
+      WITH combined AS (${combinedProtocolStatsSql})
       SELECT
         date_trunc('day', proven_at) as date,
         COUNT(*)::int as proven_total,
@@ -58,7 +65,7 @@ export class StatsService {
         SUM(CASE WHEN 'SP1' = ANY(proof_systems) THEN 1 ELSE 0 END)::int as sp1_total,
         SUM(CASE WHEN 'RISC0' = ANY(proof_systems) THEN 1 ELSE 0 END)::int as risc0_total,
         AVG(EXTRACT(EPOCH FROM proven_at - proposed_at)) as proving_avg_seconds
-      FROM batches
+      FROM combined
       WHERE proven_at BETWEEN ${start} AND ${addDays(end, 1)}
         AND is_contested = false
         AND proposed_at IS NOT NULL
@@ -68,10 +75,11 @@ export class StatsService {
     const verificationRows = await this.prisma.$queryRaw<
       { date: Date; verification_avg_seconds: number | null }[]
     >`
+      WITH combined AS (${combinedProtocolStatsSql})
       SELECT
         date_trunc('day', verified_at) as date,
         AVG(EXTRACT(EPOCH FROM verified_at - proposed_at)) as verification_avg_seconds
-      FROM batches
+      FROM combined
       WHERE verified_at BETWEEN ${start} AND ${addDays(end, 1)}
         AND is_contested = false
         AND proposed_at IS NOT NULL
@@ -119,12 +127,24 @@ export class StatsService {
   }
 
   private async resolveStatsEndDate(): Promise<Date> {
-    const aggregate = await this.prisma.batch.aggregate({
-      _max: { proposedAt: true, provenAt: true, verifiedAt: true }
-    });
+    const [row] = await this.prisma.$queryRaw<
+      {
+        max_proposed_at: Date | null;
+        max_proven_at: Date | null;
+        max_verified_at: Date | null;
+      }[]
+    >`
+      WITH combined AS (${combinedProtocolStatsSql})
+      SELECT
+        MAX(proposed_at) AS max_proposed_at,
+        MAX(proven_at) AS max_proven_at,
+        MAX(verified_at) AS max_verified_at
+      FROM combined
+    `;
 
-    const candidates = [aggregate._max.verifiedAt, aggregate._max.provenAt, aggregate._max.proposedAt]
-      .filter((value): value is Date => value instanceof Date);
+    const candidates = [row?.max_verified_at, row?.max_proven_at, row?.max_proposed_at].filter(
+      (value): value is Date => value instanceof Date
+    );
 
     if (!candidates.length) {
       return startOfUtcDay(new Date());
@@ -181,10 +201,11 @@ export class StatsService {
     const [summaryRow] = await this.prisma.$queryRaw<
       { proven_total: number; zk_proven_total: number }[]
     >`
+      WITH combined AS (${combinedProtocolStatsSql})
       SELECT
         COUNT(*)::int as proven_total,
         SUM(CASE WHEN proof_systems && ARRAY['SP1','RISC0']::"ProofSystem"[] THEN 1 ELSE 0 END)::int as zk_proven_total
-      FROM batches
+      FROM combined
       WHERE ${summaryRange}
         AND is_contested = false
         AND proposed_at IS NOT NULL
@@ -272,13 +293,14 @@ export class StatsService {
             p99_seconds: number | string | null;
           }[]
         >`
+          WITH combined AS (${combinedProtocolStatsSql})
           SELECT
             AVG(EXTRACT(EPOCH FROM proven_at - proposed_at)) as avg_seconds,
             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as median_seconds,
             PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as p90_seconds,
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as p95_seconds,
             PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as p99_seconds
-          FROM batches
+          FROM combined
           WHERE ${rangeClause}
             AND is_contested = false
             AND proposed_at IS NOT NULL
@@ -294,13 +316,14 @@ export class StatsService {
             p99_seconds: number | string | null;
           }[]
         >`
+          WITH combined AS (${combinedProtocolStatsSql})
           SELECT
             AVG(EXTRACT(EPOCH FROM proven_at - proposed_at)) as avg_seconds,
             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as median_seconds,
             PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as p90_seconds,
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as p95_seconds,
             PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM proven_at - proposed_at)) as p99_seconds
-          FROM batches
+          FROM combined
           WHERE ${rangeClause}
             AND is_contested = false
             AND proposed_at IS NOT NULL
@@ -318,10 +341,11 @@ export class StatsService {
 
     const seriesQuery = verifiedOnly
       ? this.prisma.$queryRaw<{ date: Date; avg_seconds: number | string | null }[]>`
+          WITH combined AS (${combinedProtocolStatsSql})
           SELECT
             date_trunc('day', proven_at) as date,
             AVG(EXTRACT(EPOCH FROM proven_at - proposed_at)) as avg_seconds
-          FROM batches
+          FROM combined
           WHERE ${rangeClause}
             AND is_contested = false
             AND proposed_at IS NOT NULL
@@ -331,10 +355,11 @@ export class StatsService {
           ORDER BY 1
         `
       : this.prisma.$queryRaw<{ date: Date; avg_seconds: number | string | null }[]>`
+          WITH combined AS (${combinedProtocolStatsSql})
           SELECT
             date_trunc('day', proven_at) as date,
             AVG(EXTRACT(EPOCH FROM proven_at - proposed_at)) as avg_seconds
-          FROM batches
+          FROM combined
           WHERE ${rangeClause}
             AND is_contested = false
             AND proposed_at IS NOT NULL
@@ -390,13 +415,14 @@ export class StatsService {
         p99_seconds: number | string | null;
       }[]
     >`
+      WITH combined AS (${combinedProtocolStatsSql})
       SELECT
         AVG(EXTRACT(EPOCH FROM verified_at - proposed_at)) as avg_seconds,
         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM verified_at - proposed_at)) as median_seconds,
         PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM verified_at - proposed_at)) as p90_seconds,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM verified_at - proposed_at)) as p95_seconds,
         PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM verified_at - proposed_at)) as p99_seconds
-      FROM batches
+      FROM combined
       WHERE ${rangeClause}
         AND is_contested = false
         AND proposed_at IS NOT NULL
@@ -407,10 +433,11 @@ export class StatsService {
     const seriesRows = await this.prisma.$queryRaw<
       { date: Date; avg_seconds: number | string | null }[]
     >`
+      WITH combined AS (${combinedProtocolStatsSql})
       SELECT
         date_trunc('day', verified_at) as date,
         AVG(EXTRACT(EPOCH FROM verified_at - proposed_at)) as avg_seconds
-      FROM batches
+      FROM combined
       WHERE ${rangeClause}
         AND is_contested = false
         AND proposed_at IS NOT NULL

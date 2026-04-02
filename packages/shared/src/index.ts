@@ -1,11 +1,14 @@
 export type ProofSystem = "TEE" | "SP1" | "RISC0";
 export type TeeVerifier = "SGX_GETH" | "SGX_RETH";
+export type BatchProtocol = "PACAYA" | "SHASTA";
 
 export type BatchStatus = "proposed" | "proven" | "verified";
 export type BatchProofType = "all" | "zk" | "non-zk";
 export type BatchDateField = "proposedAt" | "provenAt";
 
 export interface BatchSummary {
+  recordKey: string;
+  protocol: BatchProtocol;
   batchId: string;
   proposer: string;
   status: BatchStatus;
@@ -19,6 +22,8 @@ export interface BatchSummary {
 }
 
 export interface BatchDetail extends BatchSummary {
+  actualProver?: string | null;
+  parentProposalHash?: string | null;
   proposedBlock: string;
   provenBlock?: string | null;
   verifiedBlock?: string | null;

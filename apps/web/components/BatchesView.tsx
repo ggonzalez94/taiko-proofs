@@ -7,6 +7,7 @@ import {
   BatchDateField,
   BatchDetailResponse,
   BatchProofType,
+  BatchProtocol,
   BatchStatus,
   BatchesResponse,
   ProofSystem,
@@ -38,6 +39,10 @@ const systemLabels: Record<ProofSystem, string> = {
 const teeLabels: Record<TeeVerifier, string> = {
   SGX_GETH: "SGX GETH",
   SGX_RETH: "SGX RETH"
+};
+const protocolLabels: Record<BatchProtocol, string> = {
+  PACAYA: "Pacaya",
+  SHASTA: "Shasta"
 };
 type ProofFilterOption =
   | { type: "system"; value: ProofSystem; label: string }
@@ -166,25 +171,42 @@ function ProofBadgeGroup({
 }
 
 type BatchItem = BatchesResponse["items"][number];
+type SelectedBatch = Pick<BatchItem, "batchId" | "protocol" | "recordKey">;
+
+const getRecordNoun = (protocol: BatchProtocol) =>
+  protocol === "SHASTA" ? "Proposal" : "Batch";
+
+function ProtocolBadge({ protocol }: { protocol: BatchProtocol }) {
+  return (
+    <span className="rounded-full border border-line/70 bg-slate px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-white/60">
+      {protocolLabels[protocol]}
+    </span>
+  );
+}
 
 function BatchCard({
   batch,
   onSelect
 }: {
   batch: BatchItem;
-  onSelect: (batchId: string) => void;
+  onSelect: (batch: SelectedBatch) => void;
 }) {
+  const noun = getRecordNoun(batch.protocol);
+
   return (
     <button
       type="button"
-      onClick={() => onSelect(batch.batchId)}
-      aria-label={`View batch ${batch.batchId}`}
+      onClick={() => onSelect(batch)}
+      aria-label={`View ${noun.toLowerCase()} ${batch.batchId}`}
       className="w-full rounded-2xl border border-line/60 bg-slate/60 p-4 text-left transition hover:border-line/80 hover:bg-slate/80"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium text-white">
-          Batch #{batch.batchId}
-        </span>
+        <div className="space-y-2">
+          <span className="block text-sm font-medium text-white">
+            {noun} #{batch.batchId}
+          </span>
+          <ProtocolBadge protocol={batch.protocol} />
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={batch.status} contested={batch.isContested} />
           {batch.isLegacy && <LegacyBadge />}
@@ -240,7 +262,7 @@ export default function BatchesView({ range }: BatchesViewProps) {
     const parsed = parseBoolean(searchParams.get("contested"));
     return parsed === false ? false : undefined;
   });
-  const [selectedBatch, setSelectedBatch] = useState<string | null>(null);
+  const [selectedBatch, setSelectedBatch] = useState<SelectedBatch | null>(null);
   const isNonZkFilterActive = proofType === "non-zk" && hasProof;
   const rangeKey = `${range.start}:${range.end}`;
   const previousRange = useRef(rangeKey);
@@ -331,7 +353,11 @@ export default function BatchesView({ range }: BatchesViewProps) {
   );
 
   const { data: detail } = useSWR<BatchDetailResponse>(
-    selectedBatch ? buildApiUrl(`/batches/${selectedBatch}`) : null,
+    selectedBatch
+      ? buildApiUrl(
+          `/batches/${selectedBatch.protocol.toLowerCase()}/${selectedBatch.batchId}`
+        )
+      : null,
     fetcher
   );
 
@@ -362,9 +388,9 @@ export default function BatchesView({ range }: BatchesViewProps) {
       <div className="card">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="font-display text-2xl text-white">Batches</h2>
+            <h2 className="font-display text-2xl text-white">Batches & Proposals</h2>
             <p className="mt-2 text-sm text-white/60">
-              Latest batches across the selected range.
+              Archived Pacaya batches and live Shasta proposals across the selected range.
             </p>
           </div>
 
@@ -439,7 +465,7 @@ export default function BatchesView({ range }: BatchesViewProps) {
                 setPageInUrl(1, "replace");
               }
             }}
-            placeholder="Search batch id"
+            placeholder="Search batch or proposal id"
             className="w-full rounded-full border border-line/70 bg-slate px-4 py-2 text-sm text-white/80 sm:ml-auto sm:min-w-[180px] sm:w-auto"
           />
         </div>
@@ -449,7 +475,7 @@ export default function BatchesView({ range }: BatchesViewProps) {
         <div className="space-y-3 lg:hidden">
           {data?.items?.map((batch) => (
             <BatchCard
-              key={batch.batchId}
+              key={batch.recordKey}
               batch={batch}
               onSelect={setSelectedBatch}
             />
@@ -459,7 +485,7 @@ export default function BatchesView({ range }: BatchesViewProps) {
         <table className="hidden w-full text-left text-sm lg:table">
           <thead className="text-white/60">
             <tr>
-              <th className="px-4 py-3">Batch</th>
+              <th className="px-4 py-3">Record</th>
               <th className="px-4 py-3">Proof Systems</th>
               <th className="px-4 py-3">
                 <div className="flex flex-col">
@@ -491,11 +517,18 @@ export default function BatchesView({ range }: BatchesViewProps) {
           <tbody>
             {data?.items?.map((batch) => (
               <tr
-                key={batch.batchId}
+                key={batch.recordKey}
                 className="border-t border-line/60 hover:bg-slate/60 cursor-pointer"
-                onClick={() => setSelectedBatch(batch.batchId)}
+                onClick={() => setSelectedBatch(batch)}
               >
-                <td className="px-4 py-3 font-medium text-white">#{batch.batchId}</td>
+                <td className="px-4 py-3 font-medium text-white">
+                  <div className="space-y-1">
+                    <div>
+                      {getRecordNoun(batch.protocol)} #{batch.batchId}
+                    </div>
+                    <ProtocolBadge protocol={batch.protocol} />
+                  </div>
+                </td>
                 <td className="px-4 py-3">
                   <ProofBadgeGroup
                     proofSystems={batch.proofSystems}
@@ -523,7 +556,9 @@ export default function BatchesView({ range }: BatchesViewProps) {
         </table>
 
         {data && data.items.length === 0 && (
-          <div className="px-4 py-10 text-center text-white/50">No batches found.</div>
+          <div className="px-4 py-10 text-center text-white/50">
+            No batches or proposals found.
+          </div>
         )}
 
         <div className="flex flex-col gap-3 border-t border-line/60 px-4 py-4 text-sm text-white/70 sm:flex-row sm:items-center sm:justify-between">
@@ -599,11 +634,18 @@ function BatchDrawer({
   batch: BatchDetailResponse["batch"];
   onClose: () => void;
 }) {
+  const noun = getRecordNoun(batch.protocol);
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/60">
       <div className="h-full w-full max-w-lg overflow-y-auto bg-ink p-4 shadow-xl sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="font-display text-2xl text-white">Batch #{batch.batchId}</h3>
+          <div className="space-y-2">
+            <h3 className="font-display text-2xl text-white">
+              {noun} #{batch.batchId}
+            </h3>
+            <ProtocolBadge protocol={batch.protocol} />
+          </div>
           <button
             className="rounded-full border border-line/70 px-3 py-1 text-xs uppercase tracking-[0.2em] text-white/60"
             onClick={onClose}
@@ -620,7 +662,14 @@ function BatchDrawer({
         )}
 
         <div className="mt-6 space-y-4 text-sm text-white/70">
+          <DetailRow label="Protocol" value={protocolLabels[batch.protocol]} />
           <DetailRow label="Proposer" value={batch.proposer} mono />
+          {batch.actualProver && (
+            <DetailRow label="Actual Prover" value={batch.actualProver} mono />
+          )}
+          {batch.parentProposalHash && (
+            <DetailRow label="Parent Proposal Hash" value={batch.parentProposalHash} mono />
+          )}
           <DetailRow label="Status" value={batch.status} />
           <DetailRow
             label="Proof Systems"

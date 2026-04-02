@@ -4,13 +4,12 @@ import { IndexerController } from "./indexer.controller";
 import { PrismaModule } from "../prisma/prisma.module";
 import { ChainModule } from "../chain/chain.module";
 import { AppConfigModule } from "../config/app-config.module";
-import { ProofClassifierService } from "./proof-classifier.service";
-import { VerifierRegistryService } from "./verifier-registry.service";
 import { StatsModule } from "../stats/stats.module";
+import { ShastaProofClassifierService } from "./shasta-proof-classifier.service";
 
 @Module({
   imports: [PrismaModule, ChainModule, AppConfigModule, StatsModule],
-  providers: [IndexerService, ProofClassifierService, VerifierRegistryService],
+  providers: [IndexerService, ShastaProofClassifierService],
   controllers: [IndexerController]
 })
 export class IndexerModule {}

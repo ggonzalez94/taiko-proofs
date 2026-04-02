@@ -2,40 +2,25 @@ import { Injectable, Logger } from "@nestjs/common";
 import { randomUUID } from "crypto";
 import {
   decodeEventLog,
-  parseAbiItem,
+  type AbiEvent,
   Log,
-  PublicClient,
   HttpRequestError,
   TimeoutError
 } from "viem";
 import { PrismaService } from "../prisma/prisma.service";
 import { ChainService } from "../chain/chain.service";
 import { AppConfigService } from "../config/app-config.service";
-import { taikoInboxAbi } from "../chain/taikoInboxAbi";
-import { ProofClassifierService } from "./proof-classifier.service";
 import { StatsService } from "../stats/stats.service";
-import { ProofSystem, TeeVerifier } from "@taikoproofs/shared";
+import { shastaInboxAbi } from "../chain/shastaInboxAbi";
+import { ShastaProofClassifierService } from "./shasta-proof-classifier.service";
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-
-const batchProposedEvent = parseAbiItem(
-  "event BatchProposed((bytes32,(uint16,uint8,bytes32[])[],bytes32[],bytes32,address,uint64,uint64,uint32,uint32,uint32,uint64,uint64,uint64,bytes32,(uint8,uint8,uint32,uint64,uint32)) info,(bytes32,address,uint64,uint64) meta,bytes txList)"
-);
-const batchesProvedEvent = parseAbiItem(
-  "event BatchesProved(address verifier,uint64[] batchIds,(bytes32 parentHash,bytes32 blockHash,bytes32 stateRoot)[] transitions)"
-);
-const batchesVerifiedEvent = parseAbiItem(
-  "event BatchesVerified(uint64 batchId,bytes32 blockHash)"
-);
-const conflictingProofEvent = parseAbiItem(
-  "event ConflictingProof(uint64 batchId,(bytes32 parentHash,bytes32 blockHash,bytes32 stateRoot,address prover,bool inProvingWindow,uint48 createdAt) oldTran,(bytes32 parentHash,bytes32 blockHash,bytes32 stateRoot) newTran)"
-);
-
-type GetLogsEvent = NonNullable<
-  NonNullable<Parameters<PublicClient["getLogs"]>[0]> extends { event?: infer E }
-    ? E
-    : never
->;
+const proposedEvent = shastaInboxAbi.find(
+  (item) => item.type === "event" && item.name === "Proposed"
+) as AbiEvent;
+const provedEvent = shastaInboxAbi.find(
+  (item) => item.type === "event" && item.name === "Proved"
+) as AbiEvent;
+const SHASTA_FORK_TIMESTAMP = 1775135700n; // 2026-04-02 13:15:00 UTC
 
 type IndexingResult = {
   fromBlock: string;
@@ -45,17 +30,29 @@ type IndexingResult = {
   status: "skipped" | "partial" | "success";
 };
 
+type ProposedLogArgs = {
+  id: number | bigint;
+  proposer: string;
+  parentProposalHash: `0x${string}`;
+};
+
+type ProvedLogArgs = {
+  firstProposalId: number | bigint;
+  firstNewProposalId: number | bigint;
+  lastProposalId: number | bigint;
+  actualProver: string;
+};
+
 @Injectable()
 export class IndexerService {
   private readonly logger = new Logger(IndexerService.name);
   private logRangeLimit?: bigint;
-  private lastVerifiedBatchId: bigint = 0n;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly chain: ChainService,
     private readonly config: AppConfigService,
-    private readonly classifier: ProofClassifierService,
+    private readonly classifier: ShastaProofClassifierService,
     private readonly stats: StatsService
   ) {
     if (this.config.indexerLogRangeLimit) {
@@ -71,13 +68,13 @@ export class IndexerService {
         ? latestBlock - BigInt(this.config.confirmations)
         : latestBlock;
 
-    const startBlock = this.config.startBlock ?? Number(safeBlock);
-    const lock = await this.acquireIndexingLock(BigInt(startBlock));
+    const startBlock = await this.resolveStartBlock(safeBlock);
+    const lock = await this.acquireIndexingLock(startBlock);
     if (!lock) {
       this.logger.warn("Indexing already running; skipping this run.");
       return {
-        fromBlock: BigInt(startBlock).toString(),
-        toBlock: BigInt(startBlock).toString(),
+        fromBlock: startBlock.toString(),
+        toBlock: startBlock.toString(),
         targetBlock: safeBlock.toString(),
         processed: 0,
         status: "skipped"
@@ -88,8 +85,7 @@ export class IndexerService {
     const fromBlock =
       lastProcessedBlock > BigInt(this.config.reorgBuffer)
         ? lastProcessedBlock - BigInt(this.config.reorgBuffer)
-        : BigInt(startBlock);
-
+        : startBlock;
     const chunkSize = BigInt(this.config.indexerChunkSize);
 
     if (safeBlock <= fromBlock) {
@@ -136,14 +132,14 @@ export class IndexerService {
         const processedInRange = await this.processRange(cursor, toBlock);
         processed += processedInRange;
 
-        const rangeDurationSeconds = ((Date.now() - rangeStartedAt) / 1000).toFixed(1);
         this.logger.log(
-          `Processed range ${cursor} -> ${toBlock}: ${processedInRange} event(s) in ${rangeDurationSeconds}s.`
+          `Processed range ${cursor} -> ${toBlock}: ${processedInRange} event(s) in ${this.formatDuration(
+            rangeStartedAt
+          )}.`
         );
 
         await this.checkpointIndexingProgress(lockId, toBlock);
         lastCheckpointBlock = toBlock;
-
         rangeIndex += 1n;
       }
 
@@ -155,11 +151,12 @@ export class IndexerService {
         )}.`
       );
 
-      const runDurationSeconds = ((Date.now() - runStartedAt) / 1000).toFixed(1);
       const caughtUp = lastCheckpointBlock >= safeBlock;
       const status = caughtUp ? "success" : "partial";
       this.logger.log(
-        `Indexing run ${status}: processed ${processed} event(s) in ${runDurationSeconds}s.`
+        `Indexing run ${status}: processed ${processed} event(s) in ${this.formatDuration(
+          runStartedAt
+        )}.`
       );
 
       await this.releaseIndexingLock(lockId, status);
@@ -177,47 +174,17 @@ export class IndexerService {
   }
 
   private async processRange(fromBlock: bigint, toBlock: bigint): Promise<number> {
-    const rangeLabel = `${fromBlock} -> ${toBlock}`;
     const rollbackStartedAt = Date.now();
     const rollbackStats = await this.rollbackRange(fromBlock, toBlock);
     this.logger.log(
-      `Range ${rangeLabel} rollback: ${rollbackStats.proofs} proofs, ${rollbackStats.verified} verified batches, ${rollbackStats.reconciled} reconciled in ${this.formatDuration(
+      `Range ${fromBlock} -> ${toBlock} rollback: ${rollbackStats.deleted} proposals deleted, ${rollbackStats.reverted} proofs reverted in ${this.formatDuration(
         rollbackStartedAt
       )}.`
     );
 
-    const resetStartedAt = Date.now();
-    await this.resetVerificationCursor(fromBlock);
-    this.logger.log(
-      `Range ${rangeLabel} reset verification cursor in ${this.formatDuration(resetStartedAt)}.`
-    );
-
     const client = this.chain.getClient();
-    const proposedLogs = await this.fetchLogsWithTiming(
-      "BatchProposed",
-      batchProposedEvent,
-      fromBlock,
-      toBlock
-    );
-    const provedLogs = await this.fetchLogsWithTiming(
-      "BatchesProved",
-      batchesProvedEvent,
-      fromBlock,
-      toBlock
-    );
-    const verifiedLogs = await this.fetchLogsWithTiming(
-      "BatchesVerified",
-      batchesVerifiedEvent,
-      fromBlock,
-      toBlock
-    );
-    const conflictingLogs = await this.fetchLogsWithTiming(
-      "ConflictingProof",
-      conflictingProofEvent,
-      fromBlock,
-      toBlock
-    );
-
+    const proposedLogs = await this.fetchLogsWithTiming("Proposed", proposedEvent, fromBlock, toBlock);
+    const provedLogs = await this.fetchLogsWithTiming("Proved", provedEvent, fromBlock, toBlock);
     const blockTimestampCache = new Map<string, Date>();
 
     const getBlockTimestamp = async (blockNumber: bigint) => {
@@ -228,98 +195,115 @@ export class IndexerService {
       }
 
       const block = await client.getBlock({ blockNumber });
-      const date = new Date(Number(block.timestamp) * 1000);
-      blockTimestampCache.set(key, date);
-      return date;
+      const timestamp = new Date(Number(block.timestamp) * 1000);
+      blockTimestampCache.set(key, timestamp);
+      return timestamp;
     };
 
     const proposedStartedAt = Date.now();
     for (const log of proposedLogs) {
-      await this.handleBatchProposed(log, getBlockTimestamp);
+      await this.handleProposed(log, getBlockTimestamp);
     }
     this.logger.log(
-      `Range ${rangeLabel} handled ${proposedLogs.length} BatchProposed log(s) in ${this.formatDuration(
+      `Range ${fromBlock} -> ${toBlock} handled ${proposedLogs.length} Proposed log(s) in ${this.formatDuration(
         proposedStartedAt
       )}.`
     );
 
     const provedStartedAt = Date.now();
     for (const log of provedLogs) {
-      await this.handleBatchesProved(log, getBlockTimestamp);
+      await this.handleProved(log, getBlockTimestamp);
     }
     this.logger.log(
-      `Range ${rangeLabel} handled ${provedLogs.length} BatchesProved log(s) in ${this.formatDuration(
+      `Range ${fromBlock} -> ${toBlock} handled ${provedLogs.length} Proved log(s) in ${this.formatDuration(
         provedStartedAt
       )}.`
     );
 
-    const verifiedStartedAt = Date.now();
-    for (const log of verifiedLogs) {
-      await this.handleBatchesVerified(log, getBlockTimestamp);
-    }
-    this.logger.log(
-      `Range ${rangeLabel} handled ${verifiedLogs.length} BatchesVerified log(s) in ${this.formatDuration(
-        verifiedStartedAt
-      )}.`
-    );
+    return proposedLogs.length + provedLogs.length;
+  }
 
-    const conflictingStartedAt = Date.now();
-    for (const log of conflictingLogs) {
-      await this.handleConflictingProof(log);
+  private async resolveStartBlock(safeBlock: bigint): Promise<bigint> {
+    if (typeof this.config.shastaStartBlock === "number") {
+      return BigInt(this.config.shastaStartBlock);
     }
-    this.logger.log(
-      `Range ${rangeLabel} handled ${conflictingLogs.length} ConflictingProof log(s) in ${this.formatDuration(
-        conflictingStartedAt
-      )}.`
-    );
 
-    return (
-      proposedLogs.length +
-      provedLogs.length +
-      verifiedLogs.length +
-      conflictingLogs.length
+    const resolved = await this.findFirstBlockAtOrAfterTimestamp(
+      SHASTA_FORK_TIMESTAMP,
+      safeBlock
     );
+    this.logger.log(
+      `Resolved initial Shasta start block ${resolved.toString()} from fork timestamp ${SHASTA_FORK_TIMESTAMP.toString()}.`
+    );
+    return resolved;
+  }
+
+  private async findFirstBlockAtOrAfterTimestamp(
+    targetTimestamp: bigint,
+    maxBlock: bigint
+  ): Promise<bigint> {
+    const client = this.chain.getClient();
+    const timestampCache = new Map<string, bigint>();
+
+    const getBlockTimestamp = async (blockNumber: bigint) => {
+      const key = blockNumber.toString();
+      const cached = timestampCache.get(key);
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      const block = await client.getBlock({ blockNumber });
+      const timestamp = BigInt(block.timestamp);
+      timestampCache.set(key, timestamp);
+      return timestamp;
+    };
+
+    if ((await getBlockTimestamp(maxBlock)) < targetTimestamp) {
+      return maxBlock;
+    }
+
+    let low = 0n;
+    let high = maxBlock;
+
+    while (low < high) {
+      const mid = low + (high - low) / 2n;
+      const timestamp = await getBlockTimestamp(mid);
+
+      if (timestamp >= targetTimestamp) {
+        high = mid;
+      } else {
+        low = mid + 1n;
+      }
+    }
+
+    return low;
   }
 
   private async rollbackRange(
     fromBlock: bigint,
     toBlock: bigint
-  ): Promise<{ proofs: number; verified: number; reconciled: number }> {
-    const proofsInRange = await this.prisma.batchProof.findMany({
+  ): Promise<{ deleted: number; reverted: number }> {
+    const proposedInRange = await this.prisma.shastaProposal.findMany({
+      where: {
+        proposedBlock: {
+          gte: fromBlock,
+          lte: toBlock
+        }
+      },
+      select: { proposalId: true }
+    });
+
+    const provedInRange = await this.prisma.shastaProposal.findMany({
       where: {
         provenBlock: {
           gte: fromBlock,
           lte: toBlock
         }
       },
-      select: { batchId: true }
+      select: { proposalId: true }
     });
 
-    const verifiedInRange = await this.prisma.batch.findMany({
-      where: {
-        verifiedBlock: {
-          gte: fromBlock,
-          lte: toBlock
-        }
-      },
-      select: { batchId: true }
-    });
-
-    const affectedBatchIds = new Set<bigint>([
-      ...proofsInRange.map((row) => row.batchId),
-      ...verifiedInRange.map((row) => row.batchId)
-    ]);
-
-    await this.prisma.batchProof.deleteMany({
-      where: {
-        provenBlock: {
-          gte: fromBlock,
-          lte: toBlock
-        }
-      }
-    });
-
-    await this.prisma.batch.updateMany({
+    await this.prisma.shastaProposal.updateMany({
       where: {
         provenBlock: {
           gte: fromBlock,
@@ -327,152 +311,81 @@ export class IndexerService {
         }
       },
       data: {
-        status: "proposed",
+        actualProver: null,
         provenAt: null,
         provenBlock: null,
         proofTxHash: null,
+        verifierAddress: null,
         proofSystems: { set: [] },
         teeVerifiers: { set: [] },
-        verifierAddress: null,
+        verifiedAt: null,
+        verifiedBlock: null,
+        verifiedTxHash: null,
+        status: "proposed",
         transitionParentHash: null,
         transitionBlockHash: null,
-        transitionStateRoot: null
+        transitionStateRoot: null,
+        isContested: false
       }
     });
 
-    await this.prisma.batch.updateMany({
+    await this.prisma.shastaProposal.deleteMany({
       where: {
-        verifiedBlock: {
+        proposedBlock: {
           gte: fromBlock,
           lte: toBlock
         }
-      },
-      data: {
-        verifiedAt: null,
-        verifiedBlock: null,
-        verifiedTxHash: null
       }
     });
 
-    for (const batchId of affectedBatchIds) {
-      await this.reconcileBatch(batchId);
-    }
-
     return {
-      proofs: proofsInRange.length,
-      verified: verifiedInRange.length,
-      reconciled: affectedBatchIds.size
+      deleted: proposedInRange.length,
+      reverted: provedInRange.length
     };
   }
 
-  private async reconcileBatch(batchId: bigint) {
-    const batch = await this.prisma.batch.findUnique({ where: { batchId } });
-    if (!batch) {
-      return;
-    }
-
-    const proofs = await this.prisma.batchProof.findMany({
-      where: { batchId },
-      orderBy: { provenAt: "asc" }
-    });
-
-    if (!proofs.length) {
-      await this.prisma.batch.update({
-        where: { batchId },
-        data: {
-          status: batch.verifiedAt ? "verified" : "proposed",
-          proofSystems: { set: [] },
-          teeVerifiers: { set: [] },
-          proofTxHash: null,
-          verifierAddress: null,
-          provenAt: null,
-          provenBlock: null,
-          transitionParentHash: null,
-          transitionBlockHash: null,
-          transitionStateRoot: null
-        }
-      });
-      return;
-    }
-
-    const verifiedProof = proofs.find((proof) => proof.isVerified);
-    const selectedProof = verifiedProof ?? proofs[0];
-
-    await this.prisma.batch.update({
-      where: { batchId },
-      data: {
-        status: batch.verifiedAt ? "verified" : "proven",
-        proofSystems: { set: selectedProof.proofSystems },
-        teeVerifiers: { set: selectedProof.teeVerifiers },
-        proofTxHash: selectedProof.proofTxHash,
-        verifierAddress: selectedProof.verifierAddress,
-        provenAt: selectedProof.provenAt,
-        provenBlock: selectedProof.provenBlock,
-        transitionParentHash: selectedProof.transitionParentHash,
-        transitionBlockHash: selectedProof.transitionBlockHash,
-        transitionStateRoot: selectedProof.transitionStateRoot
-      }
-    });
-  }
-
-  private async handleBatchProposed(
+  private async handleProposed(
     log: Log,
     getBlockTimestamp: (blockNumber: bigint) => Promise<Date>
   ) {
-    const decoded = decodeEventLog({
-      abi: taikoInboxAbi,
-      data: log.data,
-      topics: log.topics
-    });
-
-    const { info, meta } = decoded.args as {
-      info: { proposedIn: bigint };
-      meta: { batchId: bigint; proposedAt: bigint; proposer: string };
-    };
-
-    const batchId = BigInt(meta.batchId);
-    const proposedAt = new Date(Number(meta.proposedAt) * 1000);
-    const proposedBlock = BigInt(info.proposedIn);
-    const proposer = meta.proposer.toLowerCase();
-    const proposedTxHash = log.transactionHash ?? null;
-
-    let normalizedProposedAt = proposedAt;
-    if (log.blockNumber) {
-      const blockTimestamp = await getBlockTimestamp(log.blockNumber);
-      if (proposedAt > blockTimestamp) {
-        this.logger.warn(
-          `Batch ${batchId} proposedAt is ahead of block timestamp, using on-chain timestamp`
-        );
-        normalizedProposedAt = blockTimestamp;
-      }
-    }
-
-    await this.prisma.batch.upsert({
-      where: { batchId },
-      create: {
-        batchId,
-        proposedAt: normalizedProposedAt,
-        proposedBlock,
-        proposedTxHash,
-        proposer,
-        status: "proposed",
-        isLegacy: false
-      },
-      update: {
-        proposedAt: normalizedProposedAt,
-        proposedBlock,
-        proposer,
-        ...(proposedTxHash ? { proposedTxHash } : {}),
-        isLegacy: false
-      }
-    });
-
     if (!log.blockNumber) {
       return;
     }
+
+    const decoded = decodeEventLog({
+      abi: shastaInboxAbi,
+      data: log.data,
+      topics: log.topics
+    });
+    const { id, proposer, parentProposalHash } = decoded.args as unknown as ProposedLogArgs;
+    const proposalId = BigInt(id);
+
+    if (proposalId === 0n) {
+      return;
+    }
+
+    await this.prisma.shastaProposal.upsert({
+      where: { proposalId },
+      create: {
+        proposalId,
+        proposedAt: await getBlockTimestamp(log.blockNumber),
+        proposedBlock: BigInt(log.blockNumber),
+        proposedTxHash: log.transactionHash ?? null,
+        proposer: proposer.toLowerCase(),
+        parentProposalHash,
+        status: "proposed"
+      },
+      update: {
+        proposedAt: await getBlockTimestamp(log.blockNumber),
+        proposedBlock: BigInt(log.blockNumber),
+        ...(log.transactionHash ? { proposedTxHash: log.transactionHash } : {}),
+        proposer: proposer.toLowerCase(),
+        parentProposalHash
+      }
+    });
   }
 
-  private async handleBatchesProved(
+  private async handleProved(
     log: Log,
     getBlockTimestamp: (blockNumber: bigint) => Promise<Date>
   ) {
@@ -481,332 +394,121 @@ export class IndexerService {
     }
 
     const decoded = decodeEventLog({
-      abi: taikoInboxAbi,
+      abi: shastaInboxAbi,
       data: log.data,
       topics: log.topics
     });
+    const {
+      firstProposalId: rawFirstProposalId,
+      firstNewProposalId: rawFirstNewProposalId,
+      lastProposalId: rawLastProposalId,
+      actualProver
+    } = decoded.args as unknown as ProvedLogArgs;
+    const firstProposalId = BigInt(rawFirstProposalId);
+    const firstNewProposalId = BigInt(rawFirstNewProposalId);
+    const lastProposalId = BigInt(rawLastProposalId);
 
-    const { verifier, batchIds, transitions } = decoded.args as {
-      verifier: string;
-      batchIds: bigint[];
-      transitions: { parentHash: string; blockHash: string; stateRoot: string }[];
-    };
-    const normalizedVerifier = verifier.toLowerCase();
+    if (lastProposalId < firstNewProposalId) {
+      return;
+    }
 
     const tx = await this.chain.getClient().getTransaction({
       hash: log.transactionHash
     });
+    const submission = this.classifier.extractProofSubmission(tx.input as `0x${string}`);
+    if (!submission) {
+      return;
+    }
 
-    const proofData = this.classifier.extractProofData(tx.input as `0x${string}`);
-    const { proofSystems, teeVerifiers } = await this.classifier.classifyProof(
-      normalizedVerifier,
-      proofData
+    const proofVerifierAddress = await this.classifier.getProofVerifierAddress();
+    const normalizedActualProver = actualProver.toLowerCase();
+    const normalizedCommittedProver = submission.commitment.actualProver.toLowerCase();
+    if (normalizedCommittedProver !== normalizedActualProver) {
+      this.logger.warn(
+        `Shasta proof tx ${log.transactionHash} actual prover mismatch between event and input`
+      );
+    }
+
+    const { proofSystems, teeVerifiers } = this.classifier.classifyProof(
+      submission.proofData
     );
     const provenAt = await getBlockTimestamp(log.blockNumber);
-    const provenBlock = log.blockNumber;
+    const provenBlock = BigInt(log.blockNumber);
+    const offset = Number(firstNewProposalId - firstProposalId);
 
-    for (let i = 0; i < batchIds.length; i += 1) {
-      const batchId = BigInt(batchIds[i]);
-      const transition = transitions[i];
+    for (let proposalId = firstNewProposalId; proposalId <= lastProposalId; proposalId += 1n) {
+      const transitionIndex = offset + Number(proposalId - firstNewProposalId);
+      const transition = submission.commitment.transitions[transitionIndex];
+      if (!transition) {
+        this.logger.warn(
+          `Missing transition for Shasta proposal ${proposalId.toString()} in tx ${log.transactionHash}`
+        );
+        continue;
+      }
 
-      const { matchesVerified } = await this.applyProofToBatch(
-        batchId,
-        log.transactionHash,
-        proofSystems,
-        teeVerifiers,
-        normalizedVerifier,
-        {
-          provenAt,
-          provenBlock: BigInt(provenBlock),
-          transitionParentHash: transition.parentHash,
-          transitionBlockHash: transition.blockHash,
-          transitionStateRoot: transition.stateRoot
-        }
-      );
+      const transitionParentHash =
+        transitionIndex === 0
+          ? submission.commitment.firstProposalParentBlockHash
+          : submission.commitment.transitions[transitionIndex - 1]?.blockHash ?? null;
+      const transitionStateRoot =
+        proposalId === lastProposalId ? submission.commitment.endStateRoot : null;
+      const existing = await this.prisma.shastaProposal.findUnique({
+        where: { proposalId }
+      });
 
-      const proofUpdate = {
-        proofSystems: { set: proofSystems },
-        teeVerifiers: { set: teeVerifiers },
-        provenAt,
-        provenBlock: BigInt(provenBlock),
-        transitionParentHash: transition.parentHash,
-        transitionBlockHash: transition.blockHash,
-        transitionStateRoot: transition.stateRoot,
-        ...(matchesVerified ? { isVerified: true } : {})
-      };
-
-      await this.prisma.batchProof.upsert({
-        where: {
-          batchId_proofTxHash: {
-            batchId,
-            proofTxHash: log.transactionHash
-          }
-        },
+      await this.prisma.shastaProposal.upsert({
+        where: { proposalId },
         create: {
-          batchId,
-          verifierAddress: normalizedVerifier,
-          proofSystems,
-          teeVerifiers,
-          proofTxHash: log.transactionHash,
+          proposalId,
+          proposedAt: new Date(Number(transition.timestamp) * 1000),
+          proposedBlock: provenBlock,
+          proposedTxHash: null,
+          proposer: existing?.proposer ?? transition.proposer.toLowerCase(),
+          parentProposalHash: existing?.parentProposalHash ?? null,
+          actualProver: normalizedActualProver,
           provenAt,
-          provenBlock: BigInt(provenBlock),
-          transitionParentHash: transition.parentHash,
-          transitionBlockHash: transition.blockHash,
-          transitionStateRoot: transition.stateRoot,
-          isVerified: matchesVerified
-        },
-        update: proofUpdate
-      });
-    }
-  }
-
-  private async applyProofToBatch(
-    batchId: bigint,
-    proofTxHash: string,
-    proofSystems: ProofSystem[],
-    teeVerifiers: TeeVerifier[],
-    verifierAddress: string,
-    payload: {
-      provenAt: Date;
-      provenBlock: bigint;
-      transitionParentHash: string;
-      transitionBlockHash: string;
-      transitionStateRoot: string;
-    }
-  ): Promise<{ matchesVerified: boolean }> {
-    const existing = await this.prisma.batch.findUnique({
-      where: { batchId }
-    });
-
-    if (!existing) {
-      await this.prisma.batch.create({
-        data: {
-          batchId,
-          proposedAt: payload.provenAt,
-          proposedBlock: payload.provenBlock,
-          proposer: ZERO_ADDRESS,
-          status: "proven",
-          verifierAddress,
+          provenBlock,
+          proofTxHash: log.transactionHash,
+          verifierAddress: proofVerifierAddress,
           proofSystems,
           teeVerifiers,
-          proofTxHash,
-          provenAt: payload.provenAt,
-          provenBlock: payload.provenBlock,
-          transitionParentHash: payload.transitionParentHash,
-          transitionBlockHash: payload.transitionBlockHash,
-          transitionStateRoot: payload.transitionStateRoot,
-          isLegacy: false
-        }
-      });
-      return { matchesVerified: false };
-    }
-
-    const matchesVerified =
-      existing.status === "verified" &&
-      existing.transitionBlockHash === payload.transitionBlockHash;
-
-    if (existing.status === "verified") {
-      if (matchesVerified && !existing.proofTxHash) {
-        await this.prisma.batch.update({
-          where: { batchId },
-          data: {
-            proofSystems: { set: proofSystems },
-            teeVerifiers: { set: teeVerifiers },
-            proofTxHash,
-            verifierAddress,
-            provenAt: payload.provenAt,
-            provenBlock: payload.provenBlock,
-            transitionParentHash: payload.transitionParentHash,
-            transitionBlockHash: payload.transitionBlockHash,
-            transitionStateRoot: payload.transitionStateRoot,
-            isLegacy: false
-          }
-        });
-      }
-      return { matchesVerified };
-    }
-
-    const shouldUpdateProof =
-      !existing.provenAt || payload.provenAt < existing.provenAt;
-
-    if (!shouldUpdateProof) {
-      return { matchesVerified: false };
-    }
-
-    await this.prisma.batch.update({
-      where: { batchId },
-      data: {
-        status: "proven",
-        verifierAddress,
-        proofSystems: { set: proofSystems },
-        teeVerifiers: { set: teeVerifiers },
-        proofTxHash,
-        provenAt: payload.provenAt,
-        provenBlock: payload.provenBlock,
-        transitionParentHash: payload.transitionParentHash,
-        transitionBlockHash: payload.transitionBlockHash,
-        transitionStateRoot: payload.transitionStateRoot,
-        isLegacy: false
-      }
-    });
-    return { matchesVerified: false };
-  }
-
-  private async handleBatchesVerified(
-    log: Log,
-    getBlockTimestamp: (blockNumber: bigint) => Promise<Date>
-  ) {
-    if (!log.blockNumber) {
-      return;
-    }
-
-    const decoded = decodeEventLog({
-      abi: taikoInboxAbi,
-      data: log.data,
-      topics: log.topics
-    });
-
-    const { batchId, blockHash } = decoded.args as {
-      batchId: bigint;
-      blockHash: string;
-    };
-    const newLast = BigInt(batchId);
-    const prevLast = this.lastVerifiedBatchId ?? 0n;
-
-    if (newLast <= prevLast) {
-      return;
-    }
-
-    const verifiedAt = await getBlockTimestamp(log.blockNumber);
-    const verifiedTxHash = log.transactionHash ?? null;
-    const verifiedBlock = BigInt(log.blockNumber);
-    const rangeStart = prevLast + 1n;
-    const rangeEnd = newLast;
-
-    const existing = await this.prisma.batch.findUnique({
-      where: { batchId: newLast },
-      select: { batchId: true }
-    });
-
-    if (!existing) {
-      await this.prisma.batch.create({
-        data: {
-          batchId: newLast,
-          proposedAt: verifiedAt,
-          proposedBlock: verifiedBlock,
-          proposer: ZERO_ADDRESS,
+          verifiedAt: provenAt,
+          verifiedBlock: provenBlock,
+          verifiedTxHash: log.transactionHash,
           status: "verified",
-          isLegacy: true,
-          verifiedAt,
-          verifiedBlock,
-          verifiedTxHash,
-          transitionBlockHash: blockHash
+          transitionParentHash,
+          transitionBlockHash: transition.blockHash,
+          transitionStateRoot,
+          isContested: false
+        },
+        update: {
+          actualProver: normalizedActualProver,
+          provenAt,
+          provenBlock,
+          proofTxHash: log.transactionHash,
+          verifierAddress: proofVerifierAddress,
+          proofSystems: { set: proofSystems },
+          teeVerifiers: { set: teeVerifiers },
+          verifiedAt: provenAt,
+          verifiedBlock: provenBlock,
+          verifiedTxHash: log.transactionHash,
+          status: "verified",
+          transitionParentHash,
+          transitionBlockHash: transition.blockHash,
+          transitionStateRoot,
+          isContested: false
         }
       });
     }
-
-    await this.prisma.batch.updateMany({
-      where: {
-        batchId: {
-          gte: rangeStart,
-          lte: rangeEnd
-        }
-      },
-      data: {
-        status: "verified",
-        verifiedAt,
-        verifiedBlock,
-        ...(verifiedTxHash ? { verifiedTxHash } : {})
-      }
-    });
-
-    if (existing) {
-      await this.prisma.batch.update({
-        where: { batchId: newLast },
-        data: {
-          transitionBlockHash: blockHash
-        }
-      });
-    }
-
-    const proof = await this.prisma.batchProof.findFirst({
-      where: {
-        batchId: newLast,
-        transitionBlockHash: blockHash
-      }
-    });
-
-    if (proof) {
-      await this.prisma.batchProof.update({
-        where: { id: proof.id },
-        data: { isVerified: true }
-      });
-
-      await this.prisma.batch.update({
-        where: { batchId: newLast },
-        data: {
-          proofSystems: { set: proof.proofSystems },
-          teeVerifiers: { set: proof.teeVerifiers },
-          proofTxHash: proof.proofTxHash,
-          verifierAddress: proof.verifierAddress,
-          provenAt: proof.provenAt,
-          provenBlock: proof.provenBlock,
-          transitionParentHash: proof.transitionParentHash,
-          transitionBlockHash: proof.transitionBlockHash,
-          transitionStateRoot: proof.transitionStateRoot,
-          isLegacy: false
-        }
-      });
-    }
-
-    this.lastVerifiedBatchId = newLast;
-  }
-
-  private async resetVerificationCursor(fromBlock: bigint) {
-    const lastVerified = await this.prisma.batch.findFirst({
-      where: {
-        verifiedBlock: {
-          lt: fromBlock
-        }
-      },
-      orderBy: { batchId: "desc" },
-      select: { batchId: true }
-    });
-
-    this.lastVerifiedBatchId = lastVerified?.batchId ?? 0n;
-  }
-
-  private async handleConflictingProof(log: Log) {
-    const decoded = decodeEventLog({
-      abi: taikoInboxAbi,
-      data: log.data,
-      topics: log.topics
-    });
-
-    const { batchId } = decoded.args as { batchId: bigint };
-    await this.prisma.batch.upsert({
-      where: { batchId },
-      create: {
-        batchId,
-        proposedAt: new Date(),
-        proposedBlock: 0n,
-        proposer: ZERO_ADDRESS,
-        status: "proposed",
-        isContested: true
-      },
-      update: {
-        isContested: true
-      }
-    });
   }
 
   private async getLogsSafe(
-    event: GetLogsEvent,
+    event: AbiEvent,
     fromBlock: bigint,
     toBlock: bigint
   ): Promise<Log[]> {
     const client = this.chain.getClient();
-    const address = this.config.taikoInboxAddress as `0x${string}`;
+    const address = this.config.shastaInboxAddress as `0x${string}`;
     const queue: Array<{ from: bigint; to: bigint; attempts: number }> = [
       { from: fromBlock, to: toBlock, attempts: 0 }
     ];
@@ -818,10 +520,7 @@ export class IndexerService {
         continue;
       }
 
-      if (
-        this.logRangeLimit &&
-        range.to - range.from + 1n > this.logRangeLimit
-      ) {
+      if (this.logRangeLimit && range.to - range.from + 1n > this.logRangeLimit) {
         this.enqueueRanges(queue, range.from, range.to, this.logRangeLimit);
         continue;
       }
@@ -835,23 +534,7 @@ export class IndexerService {
         });
         results.push(...logs);
       } catch (error) {
-        if (this.isHttpRequestError(error)) {
-          if (range.from < range.to) {
-            const mid = (range.from + range.to) / 2n;
-            queue.unshift({ from: mid + 1n, to: range.to, attempts: range.attempts });
-            queue.unshift({ from: range.from, to: mid, attempts: range.attempts });
-            continue;
-          }
-
-          if (range.attempts < 6) {
-            const delayMs = Math.min(1000 * 2 ** range.attempts, 15000);
-            await this.sleep(delayMs);
-            queue.unshift({ ...range, attempts: range.attempts + 1 });
-            continue;
-          }
-        }
-
-        if (this.isTimeoutError(error)) {
+        if (this.isHttpRequestError(error) || this.isTimeoutError(error)) {
           if (range.from < range.to) {
             const mid = (range.from + range.to) / 2n;
             queue.unshift({ from: mid + 1n, to: range.to, attempts: range.attempts });
@@ -896,7 +579,7 @@ export class IndexerService {
 
   private async fetchLogsWithTiming(
     label: string,
-    event: GetLogsEvent,
+    event: AbiEvent,
     fromBlock: bigint,
     toBlock: bigint
   ): Promise<Log[]> {
@@ -965,10 +648,7 @@ export class IndexerService {
     }
 
     const rangeMatch = text.match(
-      new RegExp(
-        "range should work:\\s*\\[0x([0-9a-f]+),\\s*0x([0-9a-f]+)\\]",
-        "i"
-      )
+      new RegExp("range should work:\\s*\\[0x([0-9a-f]+),\\s*0x([0-9a-f]+)\\]", "i")
     );
     if (rangeMatch?.[1] && rangeMatch?.[2]) {
       const from = BigInt(`0x${rangeMatch[1]}`);
@@ -1023,7 +703,7 @@ export class IndexerService {
     const lockId = randomUUID();
     const ttlSeconds = this.config.indexerLockTtlSeconds;
     const [row] = await this.prisma.$queryRaw<{ last_processed_block: bigint }[]>`
-      INSERT INTO indexing_state (
+      INSERT INTO shasta_indexing_state (
         chain_id,
         last_processed_block,
         lock_id,
@@ -1048,7 +728,8 @@ export class IndexerService {
         last_run_started_at = EXCLUDED.last_run_started_at,
         last_run_status = EXCLUDED.last_run_status,
         last_run_error = NULL
-      WHERE indexing_state.lock_expires_at IS NULL OR indexing_state.lock_expires_at < NOW()
+      WHERE shasta_indexing_state.lock_expires_at IS NULL
+        OR shasta_indexing_state.lock_expires_at < NOW()
       RETURNING last_processed_block
     `;
 
@@ -1060,10 +741,8 @@ export class IndexerService {
   }
 
   private async checkpointIndexingProgress(lockId: string, lastProcessedBlock: bigint) {
-    const lockExpiresAt = new Date(
-      Date.now() + this.config.indexerLockTtlSeconds * 1000
-    );
-    const result = await this.prisma.indexingState.updateMany({
+    const lockExpiresAt = new Date(Date.now() + this.config.indexerLockTtlSeconds * 1000);
+    const result = await this.prisma.shastaIndexingState.updateMany({
       where: { chainId: this.config.chainId, lockId },
       data: {
         lastProcessedBlock,
@@ -1082,7 +761,7 @@ export class IndexerService {
     error?: unknown
   ) {
     const errorMessage = status === "failed" ? this.formatError(error) : null;
-    await this.prisma.indexingState.updateMany({
+    await this.prisma.shastaIndexingState.updateMany({
       where: { chainId: this.config.chainId, lockId },
       data: {
         lockId: null,

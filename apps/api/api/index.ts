@@ -28,8 +28,9 @@ function logEnvSummary() {
     databaseHost: hostFromUrl(process.env.DATABASE_URL),
     rpcHost: hostFromUrl(process.env.RPC_URL),
     chainId: process.env.CHAIN_ID ?? "unset",
-    taikoInboxAddressSet: Boolean(process.env.TAIKO_INBOX_ADDRESS),
-    verifierConfigPathSet: Boolean(process.env.VERIFIER_CONFIG_PATH)
+    shastaInboxAddressSet: Boolean(
+      process.env.SHASTA_INBOX_ADDRESS ?? process.env.TAIKO_INBOX_ADDRESS
+    )
   });
 }
 

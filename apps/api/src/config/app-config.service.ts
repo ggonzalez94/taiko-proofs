@@ -1,22 +1,27 @@
 import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 
-const EnvSchema = z.object({
-  DATABASE_URL: z.string().min(1),
-  RPC_URL: z.string().min(1),
-  CHAIN_ID: z.coerce.number(),
-  TAIKO_INBOX_ADDRESS: z.string().min(1),
-  START_BLOCK: z.coerce.number().optional(),
-  CONFIRMATIONS: z.coerce.number().default(6),
-  REORG_BUFFER: z.coerce.number().default(100),
-  STATS_LOOKBACK_DAYS: z.coerce.number().default(90),
-  INDEXER_CHUNK_SIZE: z.coerce.number().default(2000),
-  INDEXER_LOG_RANGE_LIMIT: z.coerce.number().optional(),
-  INDEXER_LOCK_TTL_SECONDS: z.coerce.number().default(600),
-  INDEXER_MAX_RUNTIME_SECONDS: z.coerce.number().optional(),
-  L1_EXPLORER_BASE_URL: z.string().optional(),
-  VERIFIER_CONFIG_PATH: z.string().optional()
-});
+const EnvSchema = z
+  .object({
+    DATABASE_URL: z.string().min(1),
+    RPC_URL: z.string().min(1),
+    CHAIN_ID: z.coerce.number(),
+    SHASTA_INBOX_ADDRESS: z.string().min(1).optional(),
+    TAIKO_INBOX_ADDRESS: z.string().min(1).optional(),
+    SHASTA_START_BLOCK: z.coerce.number().optional(),
+    START_BLOCK: z.coerce.number().optional(),
+    CONFIRMATIONS: z.coerce.number().default(6),
+    REORG_BUFFER: z.coerce.number().default(100),
+    STATS_LOOKBACK_DAYS: z.coerce.number().default(90),
+    INDEXER_CHUNK_SIZE: z.coerce.number().default(2000),
+    INDEXER_LOG_RANGE_LIMIT: z.coerce.number().optional(),
+    INDEXER_LOCK_TTL_SECONDS: z.coerce.number().default(600),
+    INDEXER_MAX_RUNTIME_SECONDS: z.coerce.number().optional(),
+    L1_EXPLORER_BASE_URL: z.string().optional()
+  })
+  .refine((config) => Boolean(config.SHASTA_INBOX_ADDRESS ?? config.TAIKO_INBOX_ADDRESS), {
+    message: "SHASTA_INBOX_ADDRESS is required"
+  });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
 
@@ -40,12 +45,11 @@ export class AppConfigService {
     return this.config.CHAIN_ID;
   }
 
-  get taikoInboxAddress(): string {
-    return this.config.TAIKO_INBOX_ADDRESS;
+  get shastaInboxAddress(): string {
+    return this.config.SHASTA_INBOX_ADDRESS ?? this.config.TAIKO_INBOX_ADDRESS!;
   }
-
-  get startBlock(): number | undefined {
-    return this.config.START_BLOCK;
+  get shastaStartBlock(): number | undefined {
+    return this.config.SHASTA_START_BLOCK ?? this.config.START_BLOCK;
   }
 
   get confirmations(): number {
@@ -78,9 +82,5 @@ export class AppConfigService {
 
   get explorerBaseUrl(): string | undefined {
     return this.config.L1_EXPLORER_BASE_URL;
-  }
-
-  get verifierConfigPath(): string | undefined {
-    return this.config.VERIFIER_CONFIG_PATH;
   }
 }
