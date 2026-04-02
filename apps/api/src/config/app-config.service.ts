@@ -1,23 +1,29 @@
 import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 
+const emptyStringToUndefined = (value: unknown) =>
+  typeof value === "string" && value.trim() === "" ? undefined : value;
+
+const optionalString = () => z.preprocess(emptyStringToUndefined, z.string().min(1).optional());
+const optionalNumber = () => z.preprocess(emptyStringToUndefined, z.coerce.number().optional());
+
 const EnvSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
     RPC_URL: z.string().min(1),
     CHAIN_ID: z.coerce.number(),
-    SHASTA_INBOX_ADDRESS: z.string().min(1).optional(),
-    TAIKO_INBOX_ADDRESS: z.string().min(1).optional(),
-    SHASTA_START_BLOCK: z.coerce.number().optional(),
-    START_BLOCK: z.coerce.number().optional(),
+    SHASTA_INBOX_ADDRESS: optionalString(),
+    TAIKO_INBOX_ADDRESS: optionalString(),
+    SHASTA_START_BLOCK: optionalNumber(),
+    START_BLOCK: optionalNumber(),
     CONFIRMATIONS: z.coerce.number().default(6),
     REORG_BUFFER: z.coerce.number().default(100),
     STATS_LOOKBACK_DAYS: z.coerce.number().default(90),
     INDEXER_CHUNK_SIZE: z.coerce.number().default(2000),
-    INDEXER_LOG_RANGE_LIMIT: z.coerce.number().optional(),
+    INDEXER_LOG_RANGE_LIMIT: optionalNumber(),
     INDEXER_LOCK_TTL_SECONDS: z.coerce.number().default(600),
-    INDEXER_MAX_RUNTIME_SECONDS: z.coerce.number().optional(),
-    L1_EXPLORER_BASE_URL: z.string().optional()
+    INDEXER_MAX_RUNTIME_SECONDS: optionalNumber(),
+    L1_EXPLORER_BASE_URL: optionalString()
   })
   .refine((config) => Boolean(config.SHASTA_INBOX_ADDRESS ?? config.TAIKO_INBOX_ADDRESS), {
     message: "SHASTA_INBOX_ADDRESS is required"
