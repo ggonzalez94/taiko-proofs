@@ -50,6 +50,7 @@ model Batch {
   @@index([provenAt])
   @@index([verifiedAt])
   @@index([proposedAt])
+  @@index([proposedBlock])
   @@index([provenBlock])
   @@index([verifiedBlock])
   @@index([proofSystems], type: Gin)

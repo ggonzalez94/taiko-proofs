@@ -53,4 +53,15 @@ describe("AppConfigService", () => {
 
     expect(service.shastaInboxAddress).toBe("0x00000000000000000000000000000000000000aa");
   });
+
+  it("reports both inbox env names when neither value is set", () => {
+    process.env = buildEnv({
+      SHASTA_INBOX_ADDRESS: "",
+      TAIKO_INBOX_ADDRESS: ""
+    });
+
+    expect(() => new AppConfigService()).toThrow(
+      "SHASTA_INBOX_ADDRESS or TAIKO_INBOX_ADDRESS is required"
+    );
+  });
 });

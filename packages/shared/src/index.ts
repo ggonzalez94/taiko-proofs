@@ -1,5 +1,5 @@
 export type ProofSystem = "TEE" | "SP1" | "RISC0";
-export type TeeVerifier = "SGX_GETH" | "SGX_RETH";
+export type TeeVerifier = "SGX_GETH" | "TDX_GETH" | "SGX_RETH";
 export type BatchProtocol = "PACAYA" | "SHASTA";
 
 export type BatchStatus = "proposed" | "proven" | "verified";

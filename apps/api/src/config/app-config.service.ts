@@ -26,7 +26,7 @@ const EnvSchema = z
     L1_EXPLORER_BASE_URL: optionalString()
   })
   .refine((config) => Boolean(config.SHASTA_INBOX_ADDRESS ?? config.TAIKO_INBOX_ADDRESS), {
-    message: "SHASTA_INBOX_ADDRESS is required"
+    message: "SHASTA_INBOX_ADDRESS or TAIKO_INBOX_ADDRESS is required"
   });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
@@ -52,7 +52,12 @@ export class AppConfigService {
   }
 
   get shastaInboxAddress(): string {
-    return this.config.SHASTA_INBOX_ADDRESS ?? this.config.TAIKO_INBOX_ADDRESS!;
+    const inboxAddress = this.config.SHASTA_INBOX_ADDRESS ?? this.config.TAIKO_INBOX_ADDRESS;
+    if (!inboxAddress) {
+      throw new Error("SHASTA_INBOX_ADDRESS or TAIKO_INBOX_ADDRESS is required");
+    }
+
+    return inboxAddress;
   }
   get shastaStartBlock(): number | undefined {
     return this.config.SHASTA_START_BLOCK ?? this.config.START_BLOCK;

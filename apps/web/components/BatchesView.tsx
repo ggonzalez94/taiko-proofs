@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode
+} from "react";
 import useSWR from "swr";
 import clsx from "clsx";
 import {
@@ -38,6 +46,7 @@ const systemLabels: Record<ProofSystem, string> = {
 };
 const teeLabels: Record<TeeVerifier, string> = {
   SGX_GETH: "SGX GETH",
+  TDX_GETH: "TDX GETH",
   SGX_RETH: "SGX RETH"
 };
 const protocolLabels: Record<BatchProtocol, string> = {
@@ -50,11 +59,20 @@ type ProofFilterOption =
 
 const proofFilters: ProofFilterOption[] = [
   { type: "tee", value: "SGX_GETH", label: teeLabels.SGX_GETH },
+  { type: "tee", value: "TDX_GETH", label: teeLabels.TDX_GETH },
   { type: "tee", value: "SGX_RETH", label: teeLabels.SGX_RETH },
   { type: "system", value: "SP1", label: systemLabels.SP1 },
   { type: "system", value: "RISC0", label: systemLabels.RISC0 }
 ];
 const PAGE_SIZE = 20;
+const dialogFocusableSelector = [
+  'a[href]',
+  'button:not([disabled])',
+  'textarea:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])'
+].join(",");
 
 type ProofBadgeTone = "tee" | "teeGeth" | "teeReth" | "sp1" | "risc0";
 
@@ -181,6 +199,16 @@ function ProtocolBadge({ protocol }: { protocol: BatchProtocol }) {
     <span className="rounded-full border border-line/70 bg-slate px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-white/60">
       {protocolLabels[protocol]}
     </span>
+  );
+}
+
+function getDialogFocusableElements(root: HTMLDivElement | null) {
+  if (!root) {
+    return [];
+  }
+
+  return Array.from(root.querySelectorAll<HTMLElement>(dialogFocusableSelector)).filter(
+    (element) => element.offsetParent !== null || element === document.activeElement
   );
 }
 
@@ -383,6 +411,18 @@ export default function BatchesView({ range }: BatchesViewProps) {
     }
   };
 
+  const selectBatchFromKeyboard = (
+    event: KeyboardEvent<HTMLTableRowElement>,
+    batch: SelectedBatch
+  ) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    event.preventDefault();
+    setSelectedBatch(batch);
+  };
+
   return (
     <div className="space-y-6">
       <div className="card">
@@ -519,7 +559,11 @@ export default function BatchesView({ range }: BatchesViewProps) {
               <tr
                 key={batch.recordKey}
                 className="border-t border-line/60 hover:bg-slate/60 cursor-pointer"
+                role="button"
+                tabIndex={0}
+                aria-label={`View ${getRecordNoun(batch.protocol).toLowerCase()} ${batch.batchId}`}
                 onClick={() => setSelectedBatch(batch)}
+                onKeyDown={(event) => selectBatchFromKeyboard(event, batch)}
               >
                 <td className="px-4 py-3 font-medium text-white">
                   <div className="space-y-1">
@@ -635,18 +679,77 @@ function BatchDrawer({
   onClose: () => void;
 }) {
   const noun = getRecordNoun(batch.protocol);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    closeButtonRef.current?.focus();
+
+    return () => {
+      previousFocus?.focus();
+    };
+  }, []);
+
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+
+    if (event.key !== "Tab") {
+      return;
+    }
+
+    const focusableElements = getDialogFocusableElements(dialogRef.current);
+    if (!focusableElements.length) {
+      event.preventDefault();
+      return;
+    }
+
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+
+    if (event.shiftKey && document.activeElement === firstElement) {
+      event.preventDefault();
+      lastElement.focus();
+    } else if (!event.shiftKey && document.activeElement === lastElement) {
+      event.preventDefault();
+      firstElement.focus();
+    }
+  };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60">
-      <div className="h-full w-full max-w-lg overflow-y-auto bg-ink p-4 shadow-xl sm:p-6">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/60"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="batch-drawer-title"
+        tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
+        className="h-full w-full max-w-lg overflow-y-auto bg-ink p-4 shadow-xl sm:p-6"
+      >
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-2">
-            <h3 className="font-display text-2xl text-white">
+            <h3 id="batch-drawer-title" className="font-display text-2xl text-white">
               {noun} #{batch.batchId}
             </h3>
             <ProtocolBadge protocol={batch.protocol} />
           </div>
           <button
+            ref={closeButtonRef}
+            type="button"
             className="rounded-full border border-line/70 px-3 py-1 text-xs uppercase tracking-[0.2em] text-white/60"
             onClick={onClose}
           >
@@ -744,6 +847,7 @@ function DetailRow({
         <a
           href={href}
           target="_blank"
+          rel="noopener noreferrer"
           className={clsx("text-accent hover:text-accentSoft", valueClassName)}
         >
           {value}

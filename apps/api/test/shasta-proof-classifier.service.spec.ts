@@ -94,7 +94,13 @@ describe("ShastaProofClassifierService", () => {
           ]
         }
       ],
-      [[{ verifierId: 1, proof: "0x" }, { verifierId: 6, proof: "0x" }]]
+      [
+        [
+          { verifierId: 1, proof: "0x" },
+          { verifierId: 2, proof: "0x" },
+          { verifierId: 6, proof: "0x" }
+        ]
+      ]
     );
 
     const service = new ShastaProofClassifierService(
@@ -104,7 +110,7 @@ describe("ShastaProofClassifierService", () => {
 
     expect(service.classifyProof(proofPayload)).toEqual({
       proofSystems: ["TEE", "SP1"],
-      teeVerifiers: ["SGX_GETH"]
+      teeVerifiers: ["SGX_GETH", "TDX_GETH"]
     });
   });
 

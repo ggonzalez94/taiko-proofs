@@ -104,6 +104,7 @@ export class ShastaProofClassifierService {
 
       if (verifierId === TDX_GETH_VERIFIER_ID) {
         proofSystems.add("TEE");
+        teeVerifiers.add("TDX_GETH");
         continue;
       }
 

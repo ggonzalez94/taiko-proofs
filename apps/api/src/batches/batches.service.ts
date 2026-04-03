@@ -1,9 +1,10 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { BatchesQueryDto } from "./batches.dto";
 import { addDays, parseDateRange } from "../common/date";
 import {
   BatchDetail,
+  BatchDateField,
   BatchProtocol,
   BatchDetailResponse,
   BatchesResponse,
@@ -16,6 +17,10 @@ import { Prisma } from "@prisma/client";
 import { combinedProtocolRecordsSql } from "../common/protocol-records.sql";
 
 const zkProofSystems: ProofSystem[] = ["SP1", "RISC0"];
+const dateColumns: Record<BatchDateField, Prisma.Sql> = {
+  proposedAt: Prisma.sql`"proposedAt"`,
+  provenAt: Prisma.sql`"provenAt"`
+};
 
 function combineSql(parts: Prisma.Sql[], operator: "AND" | "OR"): Prisma.Sql | null {
   return parts.reduce<Prisma.Sql | null>((combined, part) => {
@@ -44,6 +49,14 @@ type CombinedBatchRow = {
   isLegacy: boolean;
 };
 
+function parseBatchId(batchId: string): bigint {
+  if (!/^[0-9]+$/.test(batchId)) {
+    throw new BadRequestException("batchId must be a number");
+  }
+
+  return BigInt(batchId);
+}
+
 @Injectable()
 export class BatchesService {
   constructor(
@@ -61,9 +74,12 @@ export class BatchesService {
       7
     );
     const dateField = query.dateField ?? "proposedAt";
-    const endBoundary = endIsDateOnly ? addDays(endDate, 1) : endDate;
+    const dateColumn = dateColumns[dateField];
+    if (!dateColumn) {
+      throw new BadRequestException("Invalid dateField");
+    }
 
-    const dateColumn = Prisma.raw(`"${dateField}"`);
+    const endBoundary = endIsDateOnly ? addDays(endDate, 1) : endDate;
     const filters: Prisma.Sql[] = [Prisma.sql`${dateColumn} >= ${startDate}`];
 
     if (endIsDateOnly) {
@@ -176,9 +192,11 @@ export class BatchesService {
   }
 
   async getBatch(protocol: BatchProtocol, batchId: string): Promise<BatchDetailResponse> {
+    const parsedBatchId = parseBatchId(batchId);
+
     if (protocol === "PACAYA") {
       const batch = await this.prisma.batch.findUnique({
-        where: { batchId: BigInt(batchId) }
+        where: { batchId: parsedBatchId }
       });
 
       if (!batch) {
@@ -216,7 +234,7 @@ export class BatchesService {
     }
 
     const proposal = await this.prisma.shastaProposal.findUnique({
-      where: { proposalId: BigInt(batchId) }
+      where: { proposalId: parsedBatchId }
     });
 
     if (!proposal) {

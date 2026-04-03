@@ -37,6 +37,7 @@ CREATE TABLE "shasta_indexing_state" (
 );
 
 CREATE INDEX "shasta_proposals_proposed_at_idx" ON "shasta_proposals"("proposed_at");
+CREATE INDEX "shasta_proposals_proposed_block_idx" ON "shasta_proposals"("proposed_block");
 CREATE INDEX "shasta_proposals_proven_at_idx" ON "shasta_proposals"("proven_at");
 CREATE INDEX "shasta_proposals_verified_at_idx" ON "shasta_proposals"("verified_at");
 CREATE INDEX "shasta_proposals_proven_block_idx" ON "shasta_proposals"("proven_block");
