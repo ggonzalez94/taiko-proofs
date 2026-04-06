@@ -14,11 +14,19 @@
 6. Start dev servers:
    - API: `pnpm --filter @taikoproofs/api dev`
    - Web: `pnpm --filter @taikoproofs/web dev`
+7. Local defaults:
+   - API listens on `http://localhost:3002`
+   - Web uses `NEXT_PUBLIC_API_BASE_URL=http://localhost:3002`
+   - If port `3000` is already occupied, Next may move the web app to another port, but it should still point at the API on `3002`.
 
 ## Indexing
 - One-off indexer run: `pnpm --filter @taikoproofs/api indexer`
 - Vercel cron will call `GET /admin/index` every 10 minutes.
-- Batches verified before `START_BLOCK` are stored as verified-only and may show limited details.
+- Live indexing is Shasta-only from the fork at `2026-04-02 13:15:00 UTC`.
+- If `SHASTA_START_BLOCK` is unset, a fresh database derives the first block at or after `2026-04-02 13:15:00 UTC` automatically.
+- Pacaya data is archived in the existing `batches` / `batch_proofs` tables for display and history only.
+- Do not point the indexer back at the Pacaya inbox and do not plan fresh Pacaya re-indexes. If historical Pacaya data is ever needed in a new environment, restore it from a database snapshot instead of chain re-indexing.
+- Shasta proposals start at proposal id `1`; the activation-time `Proposed(id=0)` event is intentionally ignored.
 
 ## Vercel setup
 - Two projects with explicit roots:
@@ -49,13 +57,10 @@
   - `DATABASE_URL`
   - `DIRECT_URL`
 
-## Verifier mapping
-- Update verifier mapping via JSON file and set `VERIFIER_CONFIG_PATH`.
-- Format:
-  ```json
-  {"tee": ["0x..."], "sp1": ["0x..."], "risc0": ["0x..."]}
-  ```
+## Proof classification
+- Live Shasta proof classification does not rely on a local verifier mapping file.
+- The indexer decodes `prove(bytes,bytes)` calldata, reads the inbox `proofVerifier` from `getConfig()`, and classifies verifier ids directly from the Shasta proof payload.
 
 ## Troubleshooting
-- If batches show empty proof systems, verify the address mapping and RPC health.
-- If latency metrics are empty, ensure `proposed_at` and `proven_at` are populated.
+- If Shasta proposals show empty proof systems, verify RPC health and confirm the proof tx input decodes as `prove(bytes,bytes)`.
+- If latency metrics are empty, ensure `proposed_at` and `proven_at` are populated in either `batches` or `shasta_proposals`.

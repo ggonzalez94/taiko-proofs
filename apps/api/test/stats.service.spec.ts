@@ -3,9 +3,13 @@ import { PrismaService } from "../src/prisma/prisma.service";
 
 const prismaStub = {
   dailyStat: {
-    findMany: jest.fn()
+    findMany: jest.fn(),
+    upsert: jest.fn()
   },
-  $queryRaw: jest.fn()
+  $queryRaw: jest.fn(),
+  batch: {
+    aggregate: jest.fn()
+  }
 };
 
 describe("StatsService", () => {
@@ -81,6 +85,23 @@ describe("StatsService", () => {
       teeSgxReth: 2,
       sp1: 3,
       risc0: 2
+    });
+  });
+
+  it("returns metadata across pacaya archive and shasta live data", async () => {
+    prismaStub.$queryRaw.mockResolvedValue([
+      {
+        data_start: new Date("2026-03-31T00:00:00.000Z"),
+        data_end: new Date("2026-04-02T00:00:00.000Z")
+      }
+    ]);
+
+    const service = new StatsService(prismaStub as unknown as PrismaService);
+    const result = await service.getMetadata();
+
+    expect(result).toEqual({
+      dataStart: "2026-03-31",
+      dataEnd: "2026-04-02"
     });
   });
 });

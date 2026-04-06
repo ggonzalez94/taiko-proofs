@@ -1,200 +1,140 @@
-# Pacaya TaikoInbox Events for Off-Chain Tracking
+# Taiko Event Architecture After Shasta
 
-This document describes the important TaikoInbox events for **proposals**, **proofs**, and
-**verification** (finalization), and what to extract from **events** vs **function calldata**.
+This repository now treats Taiko mainnet as two eras:
 
-Scope: Pacaya (batch-based) flow on L1 TaikoInbox.
-Authoritative definitions: `packages/protocol/contracts/layer1/based/ITaikoInbox.sol`.
+- **Pacaya archive**: historical-only data already stored in `batches` and `batch_proofs`
+- **Shasta live**: active indexing source from `2026-04-02 13:15:00 UTC`
 
-## Event overview (what to monitor)
+Pacaya is kept for display and historical queries only. The live indexer must not read the Pacaya inbox again.
 
-1) Proposal:
-   - `BatchProposed(BatchInfo info, BatchMetadata meta, bytes txList)`
-2) Proofs:
-   - `BatchesProved(address verifier, uint64[] batchIds, Transition[] transitions)`
-   - `ConflictingProof(uint64 batchId, TransitionState oldTran, Transition newTran)` (optional but important)
-3) Verification (finalization):
-   - `BatchesVerified(uint64 batchId, bytes32 blockHash)`
+## Inbox Addresses
 
-## Structs used in calldata (ABI decoding targets)
+- Pacaya inbox: `0x06a9Ab27c7e2255df1815E6CC0168d7755Feb19a`
+- Shasta inbox: `0x6f21C543a4aF5189eBdb0723827577e1EF57ef1f`
 
-These are the logical shapes of data encoded in function calldata. They are required to
-decode `_params` for `proposeBatch` and `proveBatches`.
+## Read Model
 
-```text
-BatchParams {
-  address proposer
-  address coinbase
-  bytes32 parentMetaHash
-  uint64 anchorBlockId
-  uint64 lastBlockTimestamp
-  bool revertIfNotFirstProposal
-  BlobParams blobParams
-  BlockParams[] blocks
-}
+- Pacaya rows remain in:
+  - `batches`
+  - `batch_proofs`
+- Shasta rows are written to:
+  - `shasta_proposals`
+- API reads merge both eras with an explicit `protocol` marker and `recordKey` (`pacaya:123`, `shasta:123`).
 
-BlobParams {
-  bytes32[] blobHashes
-  uint8 firstBlobIndex
-  uint8 numBlobs
-  uint32 byteOffset
-  uint32 byteSize
-  uint64 createdIn
-}
+## Pacaya Archive Rules
 
-BlockParams {
-  uint16 numTransactions
-  uint8 timeShift
-  bytes32[] signalSlots
-}
+- No new Pacaya proposals exist after the fork timestamp.
+- Pacaya ids remain meaningful only inside the archived dataset.
+- Do not re-index Pacaya from chain logs for new environments. Restore archived data from a database snapshot instead.
 
-BatchMetadata {
-  bytes32 infoHash
-  address proposer
-  uint64 batchId
-  uint64 proposedAt
-}
+## Shasta Live Events
 
-Transition {
-  bytes32 parentHash
-  bytes32 blockHash
-  bytes32 stateRoot
-}
-```
+Authoritative contracts:
 
-## Proposal: BatchProposed
+- `packages/protocol/contracts/layer1/core/iface/IInbox.sol`
+- `packages/protocol/contracts/layer1/core/impl/Inbox.sol`
+- `packages/protocol/contracts/layer1/mainnet/MainnetInbox.sol`
+- `packages/protocol/contracts/layer1/mainnet/MainnetVerifier.sol`
 
-Emitted by `proposeBatch(bytes _params, bytes _txList)`.
+Events to monitor from the Shasta inbox:
 
-### Extract from the event
-- `meta.batchId` (primary batch identifier)
-- `meta.proposedAt` (proposal timestamp)
-- `meta.proposer`
-- `meta.infoHash` (hash of `BatchInfo`)
-- `info.blocks[]` (numTransactions, timeShift, signalSlots)
-- `info.blobHashes` (resolved blob hashes used for DA)
-- `info.txsHash` (hash of `_txList` + blob hashes)
-- `info.anchorBlockId`, `info.anchorBlockHash`
-- `info.lastBlockId`, `info.lastBlockTimestamp`
-- `info.proposedIn` (L1 block number)
-- `info.blobCreatedIn`, `info.blobByteOffset`, `info.blobByteSize`
-- `info.coinbase`, `info.gasLimit`, `info.baseFeeConfig`
-- `txList` (raw calldata tx list; may be empty if using blobs)
+1. `Proposed(uint48 id, address proposer, bytes32 parentProposalHash, ...)`
+2. `Proved(uint48 firstProposalId, uint48 firstNewProposalId, uint48 lastProposalId, address actualProver)`
 
-The event contains almost everything you need for batch construction.
+Important behavior changes:
 
-### Extract from calldata (optional but sometimes important)
-Decode `_params` as `BatchParams` to get fields that are **not** emitted:
-- `parentMetaHash` (chain continuity check during proposal)
-- `revertIfNotFirstProposal` (proposal gating)
-- `blobParams.firstBlobIndex` and `blobParams.numBlobs` (only needed if you want to
-  reconstruct the original call; the event already includes `blobHashes`)
-- `blobParams.blobHashes` (raw input; event contains resolved hashes)
+- Proposal ids restart at `1` on Shasta.
+- The activation flow emits `Proposed(id=0)` for genesis state; ignore it.
+- `prove(bytes,bytes)` finalizes proposals immediately.
+- There is no separate `Verified` event path like Pacaya.
 
-## Proofs: BatchesProved
+## Shasta Proposal Handling
 
-Emitted by `proveBatches(bytes _params, bytes _proof)`.
+Extract from `Proposed`:
 
-### Extract from the event
-- `verifier` (verifier contract address)
-- `batchIds[]` (batches whose transitions were proved)
-- `transitions[]` with:
-  - `parentHash`
-  - `blockHash`
-  - `stateRoot`
+- `id`
+- `proposer`
+- `parentProposalHash`
+- L1 `blockNumber` as `proposed_block`
+- L1 block timestamp as `proposed_at`
+- `transactionHash` as `proposed_tx_hash`
 
-The event is enough to track that a batch has a proved transition.
+Indexing rule:
 
-### Extract from calldata (required if you need metadata or proof bytes)
-Decode `_params` as `(BatchMetadata[] metas, Transition[] transitions)`:
-- `metas[]` **are not emitted** and include:
-  - `infoHash` (matches `BatchProposed.meta.infoHash`)
-  - `proposer`
-  - `batchId`
-  - `proposedAt`
-- `_proof` contains the aggregated proof bytes (only needed if you store or verify proofs).
+- Upsert `shasta_proposals` by `proposal_id`
+- Ignore `proposal_id = 0`
 
-Indexing rule: `metas[i]` and `transitions[i]` correspond to `batchIds[i]` in the event.
+## Shasta Proof Handling
 
-### How to decode `_proof` (MainnetVerifier)
+`prove(bytes _data, bytes _proof)` carries two distinct payloads:
 
-`MainnetVerifier` inherits `ComposeVerifier`, which expects `_proof` to be an ABI-encoded
-array of sub-proofs:
+- `_data`: compact-packed `ProveInput`
+- `_proof`: ABI-encoded `ComposeVerifier.SubProof[]`
+
+### Packed `_data`
+
+The packed commitment contains:
+
+- `firstProposalId`
+- `firstProposalParentBlockHash`
+- `lastProposalHash`
+- `actualProver`
+- `endBlockNumber`
+- `endStateRoot`
+- `Transition[] transitions`
+
+Each transition contains:
+
+- `proposer`
+- `timestamp`
+- `blockHash`
+
+### `_proof` decoding
+
+`_proof` decodes as:
 
 ```text
-SubProof {
-  address verifier
+SubProof[] {
+  uint8 verifierId
   bytes proof
 }
 ```
 
-Decoding rule:
+On Shasta mainnet, verifier ids map to proof systems as follows:
 
-```text
-SubProof[] subProofs = abi.decode(_proof, (SubProof[]));
-```
+- `1` = `SGX_GETH` -> `TEE`
+- `2` = `TDX_GETH` -> `TEE`
+- `4` = `SGX_RETH` -> `TEE`
+- `5` = `RISC0_RETH` -> `RISC0`
+- `6` = `SP1_RETH` -> `SP1`
 
-Each `subProof.verifier` is called with the same `_ctxs` and its corresponding `subProof.proof`.
+The live indexer also resolves the inbox `proofVerifier` from `getConfig()` and stores that address as the top-level verifier address for Shasta rows.
 
-Mainnet-specific constraints (enforced in `MainnetVerifier`):
-- There must be **exactly 2** sub-proofs.
-- One verifier must be `sgxGethVerifier`.
-- The other must be one of: `sgxRethVerifier`, `risc0RethVerifier`, or `sp1RethVerifier`.
-- Verifiers must be strictly **ascending by address** in the array.
+### Finalization rule
 
-These constraints determine the encoding order and the accepted proof combinations.
+For every proposal in the newly finalized range `firstNewProposalId..lastProposalId`:
 
-### Optional: ConflictingProof
+- set `proven_at` and `verified_at` from the proof tx block timestamp
+- set `proven_block` and `verified_block` from the proof tx block number
+- set `proof_tx_hash` and `verified_tx_hash` to the same proof tx hash
+- set `status = verified`
+- compute `transition_parent_hash` from either:
+  - `firstProposalParentBlockHash` for the first transition in range
+  - previous transition `blockHash` for later transitions
 
-If a conflicting transition is submitted, `ConflictingProof` is emitted and the
-contract is paused. You may want to alert on this or flag affected batches.
+## Reorg Strategy
 
-Extract from the event:
-- `batchId`
-- `oldTran` (prior transition)
-- `newTran` (conflicting transition)
+- Rewind `reorgBuffer` blocks on every run.
+- For `shasta_proposals` with `proven_block` inside the rewind window:
+  - clear proof/finalization fields and return them to `status = proposed`
+- For `shasta_proposals` with `proposed_block` inside the rewind window:
+  - delete the row entirely
 
-No additional calldata is required beyond what you already decode for `proveBatches`.
+## Stats
 
-## Verification: BatchesVerified
+Charts and summaries now aggregate over a unified SQL read layer:
 
-Emitted when `_verifyBatches` advances verification.
-This can happen after **propose**, after **prove**, or via **verifyBatches**.
+- Pacaya archive rows from `batches`
+- Shasta live rows from `shasta_proposals`
 
-### Extract from the event
-- `batchId` (the **last** verified batch in this transaction)
-- `blockHash` (hash of the last verified batch)
-
-### How to mark all batches verified in this tx
-
-Verification always advances **sequentially** from `lastVerifiedBatchId + 1` and stops
-at the first gap. Therefore, all batches verified in a transaction form a **contiguous
-range**. You do **not** need to re-check parent hashes off-chain.
-
-Pseudo-code:
-
-```text
-on BatchesVerified(event):
-    new_last = event.batchId
-    prev_last = load_last_verified_batch_id(chain_id)
-
-    if new_last <= prev_last:
-        return
-
-    for batch_id in range(prev_last + 1, new_last + 1):
-        mark_batch_verified(batch_id, event.tx_hash, event.block_number, event.block_time)
-
-    save_last_verified_batch_id(chain_id, new_last)
-```
-
-### Calldata
-`verifyBatches(uint64 _length)` has no additional data needed for verification tracking.
-You may parse `_length` for debugging or analytics only.
-
-## Minimal monitoring checklist
-
-- Always monitor `BatchProposed`, `BatchesProved`, and `BatchesVerified` from the TaikoInbox.
-- Parse calldata only when you need fields **not emitted** (notably `BatchMetadata` for
-  proofs, and `parentMetaHash` for proposals).
-- Use `BatchesVerified` plus your last known verified batch to mark the full range
-  verified in that transaction.
+This preserves historical continuity while keeping Pacaya indexing permanently disabled.

@@ -10,7 +10,7 @@ import {
 
 const batchStatusValues: BatchStatus[] = ["proposed", "proven", "verified"];
 const proofSystemValues: ProofSystem[] = ["TEE", "SP1", "RISC0"];
-const teeVerifierValues: TeeVerifier[] = ["SGX_GETH", "SGX_RETH"];
+const teeVerifierValues: TeeVerifier[] = ["SGX_GETH", "TDX_GETH", "SGX_RETH"];
 const proofTypeValues: BatchProofType[] = ["all", "zk", "non-zk"];
 const dateFieldValues: BatchDateField[] = ["proposedAt", "provenAt"];
 

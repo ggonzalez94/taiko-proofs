@@ -1,7 +1,7 @@
 # TaikoProofs Architecture
 
 ## Goals
-- Provide a fast, public dashboard for Taiko batch proving coverage and latency.
+- Provide a fast, public dashboard for Taiko batch/proposal proving coverage and latency.
 - Keep the system simple, deployable on Vercel, and maintainable.
 - Avoid real-time streaming in MVP, but keep the data pipeline extensible.
 
@@ -15,10 +15,10 @@
 - Serverless function timeouts require chunked indexing.
 
 ### Data Flow
-1. **Indexer job** (triggered by Vercel Cron or local CLI) reads TaikoInbox events via L1 JSON-RPC.
-2. Events are decoded into batch and proof records.
+1. **Indexer job** (triggered by Vercel Cron or local CLI) reads Shasta inbox events via L1 JSON-RPC.
+2. Shasta events are decoded into live proposal records while archived Pacaya rows remain read-only.
 3. Daily stats are recomputed for affected ranges.
-4. **API** serves stats and batch data to the Next.js frontend.
+4. **API** serves unified stats and protocol-aware batch/proposal data to the Next.js frontend.
 
 ## Blockchain Access / Indexing Services
 - Uses standard **Ethereum JSON-RPC**.
@@ -34,19 +34,22 @@
 
 ### Backend (NestJS)
 - REST endpoints for stats and batches.
-- Indexer service to ingest events:
-  - `BatchProposed`
-  - `BatchesProved`
-  - `BatchesVerified`
-  - `ConflictingProof` (marks contested batches)
-- Proof system classification via decoded `proveBatches` input and verifier mapping.
+- Unified read layer across:
+  - archived Pacaya rows in `batches` / `batch_proofs`
+  - live Shasta rows in `shasta_proposals`
+- Indexer service to ingest Shasta events only:
+  - `Proposed`
+  - `Proved`
+- Proof system classification via decoded Shasta `prove(bytes,bytes)` input and verifier ids.
 
 ### Database (PostgreSQL)
 Tables:
-- **batches**: canonical batch state (proposed/proven/verified)
-- **batch_proofs**: every proof attempt (for multi-proof handling)
+- **batches**: archived Pacaya canonical batch state
+- **batch_proofs**: archived Pacaya proof attempts
+- **shasta_proposals**: live Shasta proposal state
 - **daily_stats**: precomputed per-day aggregates
-- **indexing_state**: last processed block and sync metadata
+- **indexing_state**: legacy Pacaya cursor state
+- **shasta_indexing_state**: live Shasta cursor state
 
 Indexes:
 - `batches(batch_id)` (PK), plus indexes on `proven_at`, `verified_at`
@@ -101,22 +104,19 @@ Notes:
 - `updated_at`
 
 ## Proof System Classification
-- Decode `proveBatches(bytes _params, bytes _proof)` tx input.
-- If `_proof` decodes to `SubProof[]`, map each sub-verifier:
-  - TEE: `sgxGethVerifier`, `sgxRethVerifier`, `SgxVerifier`, `tdxGethVerifier`
-  - SP1: `sp1RethVerifier`, `SP1Verifier`
-  - Risc0: `risc0RethVerifier`, `Risc0Verifier`
-- If non-compose verifier, classify by its address mapping.
-- Mapping owned by config (JSON/env) with optional ComposeVerifier introspection.
+- Pacaya archive keeps its historical proof-system data.
+- Shasta classification decodes `prove(bytes _data, bytes _proof)`:
+  - `_data` is the packed `ProveInput` commitment
+  - `_proof` decodes to `ComposeVerifier.SubProof[]`
+  - verifier ids map to `TEE`, `SP1`, and `RISC0`
+- The live indexer resolves the inbox `proofVerifier` through `getConfig()` and stores it as the top-level verifier address for Shasta records.
 
 ## Indexing Strategy
 - Poll L1 logs with a confirmation buffer (default 6).
 - Reprocess a small `reorgBuffer` of blocks each run.
-- Upsert events idempotently by tx hash + log index.
-- For each batch:
-  - Store all proofs in `batch_proofs`.
-  - If verified, select matching proof by `transition.blockHash`.
-  - If unverified, use earliest proof.
+- Pacaya is not re-indexed after the Shasta fork at `2026-04-02 13:15:00 UTC`.
+- Shasta rows are upserted idempotently by `proposal_id`.
+- Shasta `Proved` finalizes immediately, so `proven_at` and `verified_at` are written from the same transaction.
 - Recompute daily stats for the last N days (configurable).
 
 Chunking:
@@ -128,6 +128,7 @@ Chunking:
 - `GET /stats/proof-systems?start&end`
 - `GET /stats/latency?type=proving|verification&start&end&verifiedOnly`
 - `GET /batches?status&system&search&start&end&page&pageSize`
+- `GET /batches/:protocol/:batchId`
 - `GET /batches/:batchId`
 - `POST /admin/index` (cron trigger)
 - `GET /admin/index` (cron trigger)
@@ -165,8 +166,8 @@ Backend (`apps/api`):
 - `DATABASE_URL`
 - `RPC_URL`
 - `CHAIN_ID`
-- `TAIKO_INBOX_ADDRESS`
-- `START_BLOCK`
+- `SHASTA_INBOX_ADDRESS`
+- `SHASTA_START_BLOCK`
 - `CONFIRMATIONS` (default 6)
 - `REORG_BUFFER` (default 100)
 - `STATS_LOOKBACK_DAYS` (default 90)
