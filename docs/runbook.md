@@ -53,9 +53,8 @@
   - `VERCEL_ORG_ID`
   - `VERCEL_PROJECT_ID_TAIKOPROOFS`
   - `VERCEL_PROJECT_ID_TAIKOPROOFS_API`
-- For Prisma migrations via `.github/workflows/db-migrate.yml`, set GitHub Environment `Production – taiko-proofs-api` secrets:
-  - `DATABASE_URL`
-  - `DIRECT_URL`
+- Prisma migrations in `.github/workflows/db-migrate.yml` pull the API project's production env from Vercel before running `prisma migrate deploy`.
+- Keep `DATABASE_URL` and `DIRECT_URL` in the `taikoproofs-api` Vercel project as the single source of truth; do not maintain a second GitHub Environment copy for migrations.
 
 ## Proof classification
 - Live Shasta proof classification does not rely on a local verifier mapping file.
