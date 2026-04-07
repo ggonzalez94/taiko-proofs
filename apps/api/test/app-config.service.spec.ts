@@ -65,6 +65,18 @@ describe("AppConfigService", () => {
     expect(service.shastaInboxAddress).toBe("0x00000000000000000000000000000000000000aa");
   });
 
+  it("trims surrounding whitespace from string env values", () => {
+    process.env = buildEnv({
+      SHASTA_INBOX_ADDRESS: " 0x6f21C543a4aF5189eBdb0723827577e1EF57ef1f\n",
+      RPC_URL: " https://rpc.example/ws "
+    });
+
+    const service = new AppConfigService();
+
+    expect(service.shastaInboxAddress).toBe("0x6f21C543a4aF5189eBdb0723827577e1EF57ef1f");
+    expect(service.rpcUrl).toBe("https://rpc.example/ws");
+  });
+
   it("reports both inbox env names when neither value is set", () => {
     process.env = buildEnv({
       SHASTA_INBOX_ADDRESS: "",

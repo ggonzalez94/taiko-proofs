@@ -1,16 +1,19 @@
 import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 
-const emptyStringToUndefined = (value: unknown) =>
-  typeof value === "string" && value.trim() === "" ? undefined : value;
+const trimString = (value: unknown) => (typeof value === "string" ? value.trim() : value);
 
+const emptyStringToUndefined = (value: unknown) =>
+  trimString(value) === "" ? undefined : trimString(value);
+
+const requiredString = () => z.preprocess(trimString, z.string().min(1));
 const optionalString = () => z.preprocess(emptyStringToUndefined, z.string().min(1).optional());
 const optionalNumber = () => z.preprocess(emptyStringToUndefined, z.coerce.number().optional());
 
 const EnvSchema = z
   .object({
-    DATABASE_URL: z.string().min(1),
-    RPC_URL: z.string().min(1),
+    DATABASE_URL: requiredString(),
+    RPC_URL: requiredString(),
     CHAIN_ID: z.coerce.number(),
     SHASTA_INBOX_ADDRESS: optionalString(),
     TAIKO_INBOX_ADDRESS: optionalString(),
