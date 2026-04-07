@@ -14,6 +14,11 @@ concurrency:
 jobs:
   migrate:
     runs-on: ubuntu-latest
+    environment:
+      name: "Production – taiko-proofs-api"
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,38 +33,5 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Install Vercel CLI
-        run: pnpm add --global vercel@latest
-      - name: Pull API production environment
-        working-directory: apps/api
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_TAIKOPROOFS_API }}
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-      - name: Log target database hosts
-        working-directory: apps/api
-        run: |
-          set -a
-          source .vercel/.env.production.local
-          set +a
-          node - <<'NODE'
-          function hostFromUrl(value) {
-            return value ? new URL(value).host : null;
-          }
-
-          const databaseHost = hostFromUrl(process.env.DATABASE_URL);
-          const directHost = hostFromUrl(process.env.DIRECT_URL);
-
-          if (!databaseHost || !directHost) {
-            throw new Error("Missing DATABASE_URL or DIRECT_URL in Vercel production env");
-          }
-
-          console.log(JSON.stringify({ databaseHost, directHost }, null, 2));
-          NODE
       - name: Run Prisma migrations
-        working-directory: apps/api
-        run: |
-          set -a
-          source .vercel/.env.production.local
-          set +a
-          pnpm exec prisma migrate deploy
+        run: pnpm --filter @taikoproofs/api exec prisma migrate deploy
