@@ -60,7 +60,7 @@ export class AppConfigService {
     return inboxAddress;
   }
   get shastaStartBlock(): number | undefined {
-    return this.config.SHASTA_START_BLOCK ?? this.config.START_BLOCK;
+    return this.config.SHASTA_START_BLOCK;
   }
 
   get confirmations(): number {

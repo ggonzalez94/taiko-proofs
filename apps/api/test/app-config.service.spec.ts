@@ -33,6 +33,17 @@ describe("AppConfigService", () => {
     expect(service.shastaStartBlock).toBeUndefined();
   });
 
+  it("ignores deprecated START_BLOCK when SHASTA_START_BLOCK is unset", () => {
+    process.env = buildEnv({
+      SHASTA_START_BLOCK: "",
+      START_BLOCK: "19773965"
+    });
+
+    const service = new AppConfigService();
+
+    expect(service.shastaStartBlock).toBeUndefined();
+  });
+
   it("accepts a blank deprecated inbox alias when the Shasta inbox is set", () => {
     process.env = buildEnv({
       TAIKO_INBOX_ADDRESS: ""
