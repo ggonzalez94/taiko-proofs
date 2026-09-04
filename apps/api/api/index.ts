@@ -4,6 +4,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { ExpressAdapter } from "@nestjs/platform-express";
 import express from "express";
 import { AppModule } from "../src/app.module";
+import { parseRpcUrls } from "../src/chain/rpc-transport";
 
 const expressApp = express();
 let cachedApp: express.Express | null = null;
@@ -26,7 +27,7 @@ function logEnvSummary() {
     vercelEnv: process.env.VERCEL_ENV ?? "unset",
     region: process.env.VERCEL_REGION ?? "unset",
     databaseHost: hostFromUrl(process.env.DATABASE_URL),
-    rpcHost: hostFromUrl(process.env.RPC_URL),
+    rpcHosts: parseRpcUrls(process.env.RPC_URL ?? "").map(hostFromUrl),
     chainId: process.env.CHAIN_ID ?? "unset",
     shastaInboxAddressSet: Boolean(
       process.env.SHASTA_INBOX_ADDRESS ?? process.env.TAIKO_INBOX_ADDRESS

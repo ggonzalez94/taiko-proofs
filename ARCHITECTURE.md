@@ -164,7 +164,8 @@ taikoproofs/
 ## Environment Variables
 Backend (`apps/api`):
 - `DATABASE_URL`
-- `RPC_URL`
+- `RPC_URL` (one endpoint, or a comma-separated failover list tried in order)
+- `RPC_TIMEOUT_MS` (per-endpoint deadline, default 20000)
 - `CHAIN_ID`
 - `SHASTA_INBOX_ADDRESS`
 - `SHASTA_START_BLOCK`

@@ -77,6 +77,33 @@ describe("AppConfigService", () => {
     expect(service.rpcUrl).toBe("https://rpc.example/ws");
   });
 
+  it("splits RPC_URL into a list of endpoints and keeps the first as the primary", () => {
+    process.env = buildEnv({
+      RPC_URL: " https://a.example ,wss://b.example\n,https://a.example,"
+    });
+
+    const service = new AppConfigService();
+
+    expect(service.rpcUrls).toEqual(["https://a.example", "wss://b.example"]);
+    expect(service.rpcUrl).toBe("https://a.example");
+  });
+
+  it("defaults the RPC timeout to 20 seconds and accepts an override", () => {
+    process.env = buildEnv();
+    expect(new AppConfigService().rpcTimeoutMs).toBe(20_000);
+
+    process.env = buildEnv({ RPC_TIMEOUT_MS: "5000" });
+    expect(new AppConfigService().rpcTimeoutMs).toBe(5000);
+  });
+
+  it("rejects a non-positive RPC timeout instead of silently disabling the deadline", () => {
+    process.env = buildEnv({ RPC_TIMEOUT_MS: "0" });
+    expect(() => new AppConfigService()).toThrow();
+
+    process.env = buildEnv({ RPC_TIMEOUT_MS: "-5" });
+    expect(() => new AppConfigService()).toThrow();
+  });
+
   it("reports both inbox env names when neither value is set", () => {
     process.env = buildEnv({
       SHASTA_INBOX_ADDRESS: "",

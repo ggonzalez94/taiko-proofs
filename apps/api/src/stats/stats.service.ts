@@ -1,14 +1,17 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import {
+  IndexerRunStatus,
+  IndexerStatus,
   LatencyResponse,
   ProofSystemResponse,
   StatsMetadataResponse,
   ZkShareResponse
 } from "@taikoproofs/shared";
 import { addDays, startOfUtcDay } from "../common/date";
-import { Prisma } from "@prisma/client";
+import { Prisma, ShastaIndexingState } from "@prisma/client";
 import { combinedProtocolStatsSql } from "../common/protocol-records.sql";
+import { AppConfigService } from "../config/app-config.service";
 
 function dateKey(date: Date) {
   return date.toISOString().slice(0, 10);
@@ -16,24 +19,43 @@ function dateKey(date: Date) {
 
 @Injectable()
 export class StatsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: AppConfigService
+  ) {}
 
   async getMetadata(): Promise<StatsMetadataResponse> {
-    const [row] = await this.prisma.$queryRaw<
-      { data_start: Date | null; data_end: Date | null }[]
-    >`
-      WITH combined AS (${combinedProtocolStatsSql})
-      SELECT
-        MIN(proposed_at) AS data_start,
-        MAX(proposed_at) AS data_end
-      FROM combined
-    `;
+    const [[row], indexerState] = await Promise.all([
+      this.prisma.$queryRaw<{ data_start: Date | null; data_end: Date | null }[]>`
+        WITH combined AS (${combinedProtocolStatsSql})
+        SELECT
+          MIN(proposed_at) AS data_start,
+          MAX(proposed_at) AS data_end
+        FROM combined
+      `,
+      this.prisma.shastaIndexingState.findUnique({ where: { chainId: this.config.chainId } })
+    ]);
     const earliest = row?.data_start ?? null;
     const latest = row?.data_end ?? null;
 
     return {
       dataStart: earliest ? dateKey(earliest) : null,
-      dataEnd: latest ? dateKey(latest) : null
+      dataEnd: latest ? dateKey(latest) : null,
+      indexer: this.toIndexerStatus(indexerState)
+    };
+  }
+
+  // Deliberately omits last_run_error: it can embed RPC URLs (and their API keys).
+  private toIndexerStatus(state: ShastaIndexingState | null | undefined): IndexerStatus | null {
+    if (!state) {
+      return null;
+    }
+
+    return {
+      lastProcessedBlock: state.lastProcessedBlock?.toString() ?? null,
+      lastRunStartedAt: state.lastRunStartedAt?.toISOString() ?? null,
+      lastRunFinishedAt: state.lastRunFinishedAt?.toISOString() ?? null,
+      lastRunStatus: (state.lastRunStatus as IndexerRunStatus | null) ?? null
     };
   }
 

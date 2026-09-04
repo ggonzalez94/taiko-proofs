@@ -98,9 +98,20 @@ export interface LatencyResponse {
   series: LatencySeriesPoint[];
 }
 
+export type IndexerRunStatus = "running" | "success" | "partial" | "failed";
+
+export interface IndexerStatus {
+  lastProcessedBlock: string | null;
+  lastRunStartedAt: string | null;
+  lastRunFinishedAt: string | null;
+  lastRunStatus: IndexerRunStatus | null;
+}
+
 export interface StatsMetadataResponse {
   dataStart: string | null;
   dataEnd: string | null;
+  /** Latest live-indexer run; absent on API builds that predate it, null before the first run. */
+  indexer?: IndexerStatus | null;
 }
 
 export interface BatchesResponse {

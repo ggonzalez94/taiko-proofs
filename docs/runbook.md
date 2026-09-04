@@ -22,6 +22,8 @@
 ## Indexing
 - One-off indexer run: `pnpm --filter @taikoproofs/api indexer`
 - Vercel cron will call `GET /admin/index` every 10 minutes.
+- `RPC_URL` may list several endpoints separated by commas. They are tried in order; an endpoint that is unreachable, does not answer within `RPC_TIMEOUT_MS` (default 20s, including websocket connection setup) or fails server-side (5xx, 429, JSON-RPC internal/limit errors) is demoted behind the others for a minute, doubling on each consecutive failure up to 16 minutes. Transient server errors are retried up to three times with a short delay; other JSON-RPC errors (invalid params, block-range limits) are returned to the caller as-is. Prefer `https` endpoints on Vercel: a websocket connection never outlives a single invocation, and a dead websocket host costs a full TCP timeout per request.
+- `GET /stats/metadata` reports the latest run (`indexer.lastRunStatus`, `lastRunFinishedAt`, `lastProcessedBlock`); the dashboard shows an "Indexer behind" notice when the data is more than two days old or the latest run failed.
 - Live indexing is Shasta-only from the fork at `2026-04-02 13:15:00 UTC`.
 - If `SHASTA_START_BLOCK` is unset, a fresh database derives the first block at or after `2026-04-02 13:15:00 UTC` automatically.
 - Pacaya data is archived in the existing `batches` / `batch_proofs` tables for display and history only.
@@ -62,5 +64,10 @@
 - The indexer decodes `prove(bytes,bytes)` calldata, reads the inbox `proofVerifier` from `getConfig()`, and classifies verifier ids directly from the Shasta proof payload.
 
 ## Troubleshooting
+- If "Indexed through" stops advancing (the dashboard keeps showing the last good week because its range anchors to the last indexed day):
+  1. `curl https://api.proofs.taiko.xyz/stats/metadata` and check `indexer.lastRunStatus`.
+  2. `curl -m 300 https://api.proofs.taiko.xyz/admin/index` runs the indexer once; a `500` means the run threw.
+  3. Read `shasta_indexing_state.last_run_error` (runs that fail before taking the lock are recorded there too) or stream `vercel logs <api deployment>` while the cron fires.
+  4. A `connect ETIMEDOUT <host>:<port>` error means the `RPC_URL` host is unreachable from Vercel; point `RPC_URL` at a live endpoint (a comma-separated list adds failover) and redeploy or wait for the next cron tick. This is what stalled the dashboard from 2026-08-24 to 2026-09-04.
 - If Shasta proposals show empty proof systems, verify RPC health and confirm the proof tx input decodes as `prove(bytes,bytes)`.
 - If latency metrics are empty, ensure `proposed_at` and `proven_at` are populated in either `batches` or `shasta_proposals`.

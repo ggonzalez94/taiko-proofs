@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { z } from "zod";
+import { DEFAULT_RPC_TIMEOUT_MS, parseRpcUrls } from "../chain/rpc-transport";
 
 const trimString = (value: unknown) => (typeof value === "string" ? value.trim() : value);
 
@@ -9,11 +10,14 @@ const emptyStringToUndefined = (value: unknown) =>
 const requiredString = () => z.preprocess(trimString, z.string().min(1));
 const optionalString = () => z.preprocess(emptyStringToUndefined, z.string().min(1).optional());
 const optionalNumber = () => z.preprocess(emptyStringToUndefined, z.coerce.number().optional());
+const optionalPositiveInteger = () =>
+  z.preprocess(emptyStringToUndefined, z.coerce.number().int().positive().optional());
 
 const EnvSchema = z
   .object({
     DATABASE_URL: requiredString(),
     RPC_URL: requiredString(),
+    RPC_TIMEOUT_MS: optionalPositiveInteger(),
     CHAIN_ID: z.coerce.number(),
     SHASTA_INBOX_ADDRESS: optionalString(),
     TAIKO_INBOX_ADDRESS: optionalString(),
@@ -30,6 +34,9 @@ const EnvSchema = z
   })
   .refine((config) => Boolean(config.SHASTA_INBOX_ADDRESS ?? config.TAIKO_INBOX_ADDRESS), {
     message: "SHASTA_INBOX_ADDRESS or TAIKO_INBOX_ADDRESS is required"
+  })
+  .refine((config) => parseRpcUrls(config.RPC_URL).length > 0, {
+    message: "RPC_URL must contain at least one endpoint"
   });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
@@ -46,8 +53,18 @@ export class AppConfigService {
     return this.config.DATABASE_URL;
   }
 
+  /** Every configured RPC endpoint, in priority order. */
+  get rpcUrls(): string[] {
+    return parseRpcUrls(this.config.RPC_URL);
+  }
+
+  /** The primary RPC endpoint. */
   get rpcUrl(): string {
-    return this.config.RPC_URL;
+    return this.rpcUrls[0];
+  }
+
+  get rpcTimeoutMs(): number {
+    return this.config.RPC_TIMEOUT_MS ?? DEFAULT_RPC_TIMEOUT_MS;
   }
 
   get chainId(): number {

@@ -1,5 +1,8 @@
 import { StatsService } from "../src/stats/stats.service";
 import { PrismaService } from "../src/prisma/prisma.service";
+import { AppConfigService } from "../src/config/app-config.service";
+
+const configStub = { chainId: 1 } as AppConfigService;
 
 const prismaStub = {
   dailyStat: {
@@ -9,6 +12,9 @@ const prismaStub = {
   $queryRaw: jest.fn(),
   batch: {
     aggregate: jest.fn()
+  },
+  shastaIndexingState: {
+    findUnique: jest.fn()
   }
 };
 
@@ -32,7 +38,7 @@ describe("StatsService", () => {
       }
     ]);
 
-    const service = new StatsService(prismaStub as unknown as PrismaService);
+    const service = new StatsService(prismaStub as unknown as PrismaService, configStub);
     const result = await service.getZkShare(
       new Date("2024-01-01T00:00:00Z"),
       new Date("2024-01-02T00:00:00Z"),
@@ -71,7 +77,7 @@ describe("StatsService", () => {
       }
     ]);
 
-    const service = new StatsService(prismaStub as unknown as PrismaService);
+    const service = new StatsService(prismaStub as unknown as PrismaService, configStub);
     const result = await service.getProofSystemUsage(
       new Date("2024-02-01T00:00:00Z"),
       new Date("2024-02-01T00:00:00Z")
@@ -96,12 +102,53 @@ describe("StatsService", () => {
       }
     ]);
 
-    const service = new StatsService(prismaStub as unknown as PrismaService);
+    const service = new StatsService(prismaStub as unknown as PrismaService, configStub);
     const result = await service.getMetadata();
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       dataStart: "2026-03-31",
       dataEnd: "2026-04-02"
     });
+  });
+
+  it("includes the latest indexer run status in metadata without leaking the error text", async () => {
+    prismaStub.$queryRaw.mockResolvedValue([
+      {
+        data_start: new Date("2026-03-31T00:00:00.000Z"),
+        data_end: new Date("2026-08-24T00:00:00.000Z")
+      }
+    ]);
+    prismaStub.shastaIndexingState.findUnique.mockResolvedValue({
+      chainId: 1,
+      lastProcessedBlock: 25826000n,
+      lastRunStartedAt: new Date("2026-09-04T01:30:00.000Z"),
+      lastRunFinishedAt: new Date("2026-09-04T01:31:00.000Z"),
+      lastRunStatus: "failed",
+      lastRunError: "connect ETIMEDOUT https://user:secret@rpc.example"
+    });
+
+    const service = new StatsService(prismaStub as unknown as PrismaService, configStub);
+    const result = await service.getMetadata();
+
+    expect(result.indexer).toEqual({
+      lastProcessedBlock: "25826000",
+      lastRunStartedAt: "2026-09-04T01:30:00.000Z",
+      lastRunFinishedAt: "2026-09-04T01:31:00.000Z",
+      lastRunStatus: "failed"
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(prismaStub.shastaIndexingState.findUnique).toHaveBeenCalledWith({
+      where: { chainId: 1 }
+    });
+  });
+
+  it("reports a null indexer status before the first indexing run", async () => {
+    prismaStub.$queryRaw.mockResolvedValue([{ data_start: null, data_end: null }]);
+    prismaStub.shastaIndexingState.findUnique.mockResolvedValue(null);
+
+    const service = new StatsService(prismaStub as unknown as PrismaService, configStub);
+    const result = await service.getMetadata();
+
+    expect(result).toEqual({ dataStart: null, dataEnd: null, indexer: null });
   });
 });

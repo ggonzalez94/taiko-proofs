@@ -12,6 +12,7 @@ import { StatsMetadataResponse } from "@taikoproofs/shared";
 import { buildApiUrl, fetcher } from "../lib/api";
 import { formatUtcDateTime } from "../lib/date";
 import { formatDate } from "../lib/format";
+import { describeIndexerLag } from "../lib/indexer";
 
 const tabs = [
   { id: "stats", label: "Stats" },
@@ -46,6 +47,8 @@ export default function Dashboard() {
     const parsed = new Date(`${statsMetadata.dataEnd}T00:00:00Z`);
     return Number.isNaN(parsed.getTime()) ? undefined : parsed;
   }, [statsMetadata?.dataEnd]);
+
+  const indexerNotice = useMemo(() => describeIndexerLag(statsMetadata), [statsMetadata]);
 
   const range = useMemo(
     () => resolveRange(preset, customStart, customEnd, anchorDate),
@@ -102,6 +105,18 @@ export default function Dashboard() {
               />
             </div>
           </div>
+
+          {indexerNotice && (
+            <div
+              role="status"
+              className="rounded-2xl border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-white/80"
+            >
+              <span className="mr-2 font-medium uppercase tracking-[0.2em] text-accent">
+                Indexer behind
+              </span>
+              {indexerNotice}
+            </div>
+          )}
 
           <div className="flex w-full flex-wrap items-center gap-3 rounded-full border border-line/70 bg-slate px-2 py-2 sm:w-auto">
             {tabs.map((tab) => (

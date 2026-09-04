@@ -12,6 +12,7 @@ import { ChainService } from "../chain/chain.service";
 import { AppConfigService } from "../config/app-config.service";
 import { StatsService } from "../stats/stats.service";
 import { shastaInboxAbi } from "../chain/shastaInboxAbi";
+import { redactUrlSecrets } from "../common/redact";
 import { ShastaProofClassifierService } from "./shasta-proof-classifier.service";
 
 const proposedEvent = shastaInboxAbi.find(
@@ -62,13 +63,22 @@ export class IndexerService {
 
   async runIndexing(): Promise<IndexingResult> {
     const client = this.chain.getClient();
-    const latestBlock = await client.getBlockNumber();
-    const safeBlock =
-      latestBlock > BigInt(this.config.confirmations)
-        ? latestBlock - BigInt(this.config.confirmations)
-        : latestBlock;
+    let safeBlock: bigint;
+    let startBlock: bigint;
 
-    const startBlock = await this.resolveStartBlock(safeBlock);
+    try {
+      const latestBlock = await client.getBlockNumber();
+      safeBlock =
+        latestBlock > BigInt(this.config.confirmations)
+          ? latestBlock - BigInt(this.config.confirmations)
+          : latestBlock;
+      startBlock = await this.resolveStartBlock(safeBlock);
+    } catch (error) {
+      // Nothing holds the lock yet, so the failure would otherwise leave no trace in the DB.
+      await this.recordFailureWithoutLock(error);
+      throw error;
+    }
+
     const lock = await this.acquireIndexingLock(startBlock);
     if (!lock) {
       this.logger.warn("Indexing already running; skipping this run.");
@@ -773,10 +783,41 @@ export class IndexerService {
     });
   }
 
-  private formatError(error: unknown): string {
-    if (error instanceof Error) {
-      return (error.message || error.name).slice(0, 2000);
+  private async recordFailureWithoutLock(error: unknown) {
+    const chainId = this.config.chainId;
+    const now = new Date();
+    const outcome = {
+      lastRunFinishedAt: now,
+      lastRunStatus: "failed",
+      lastRunError: this.formatError(error)
+    };
+
+    try {
+      const { count } = await this.prisma.shastaIndexingState.updateMany({
+        where: {
+          chainId,
+          OR: [{ lockId: null }, { lockExpiresAt: { lt: now } }]
+        },
+        data: outcome
+      });
+
+      if (count === 0) {
+        // Either a live run holds the lock (leave it alone) or no run has ever started.
+        const existing = await this.prisma.shastaIndexingState.findUnique({ where: { chainId } });
+        if (!existing) {
+          await this.prisma.shastaIndexingState.create({
+            data: { chainId, lastProcessedBlock: 0n, ...outcome }
+          });
+        }
+      }
+    } catch (recordError) {
+      this.logger.warn(`Could not record indexer failure: ${this.formatError(recordError)}`);
     }
-    return String(error ?? "Unknown error").slice(0, 2000);
+  }
+
+  private formatError(error: unknown): string {
+    const message =
+      error instanceof Error ? error.message || error.name : String(error ?? "Unknown error");
+    return redactUrlSecrets(message).slice(0, 2000);
   }
 }
